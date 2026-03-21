@@ -4,6 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Container-blue)](https://www.docker.com/)
+[![Databricks](https://img.shields.io/badge/Databricks-Processing-orange)](https://databricks.com/)
 [![DBT](https://img.shields.io/badge/DBT-Transformations-orange)](https://www.getdbt.com/)
 [![Airflow](https://img.shields.io/badge/Airflow-Orchestration-blue)](https://airflow.apache.org/)
 
