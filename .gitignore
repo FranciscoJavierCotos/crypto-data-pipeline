@@ -1,0 +1,44 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python caches and tooling artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Airflow runtime artifacts and generated outputs
+logs/
+data/
+config/airflow.cfg
+config/simple_auth_manager_passwords.json*
+config/*.generated
+
+# dbt local profiles, dependencies, and build artifacts
+.dbt/
+profiles.yml
+dbt_packages/
+target/
+
+# Databricks local auth/config and secrets
+.databrickscfg
+databricks_token*
+*databricks*secret*
+
+# Local docker overrides
+docker-compose.override.yaml
+
+# IDE and OS artifacts
+.vscode/
+.DS_Store
+Thumbs.db
