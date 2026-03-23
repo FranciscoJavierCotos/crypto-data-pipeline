@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: gold_market_snapshot
+    description: Daily aggregate KPI snapshot from silver market data.
+    columns:
+      - name: snapshot_date
+        tests:
+          - not_null
+      - name: active_coins
+        tests:
+          - not_null
+      - name: latest_ingestion_ts
+        tests:
+          - not_null

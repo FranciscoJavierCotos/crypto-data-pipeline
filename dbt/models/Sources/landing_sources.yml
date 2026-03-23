@@ -1,0 +1,42 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Bronze landing zone for raw CoinGecko market data ingested by Airflow.
+    database: "{{ env_var('DATABRICKS_CATALOG', 'main') }}"
+    schema: "{{ env_var('DATABRICKS_SCHEMA', 'bronze') }}"
+    tables:
+      - name: coingecko_market_data
+        description: Raw CoinGecko payload and selected market fields captured per ingestion batch.
+        loaded_at_field: ingestion_ts
+        freshness:
+          warn_after:
+            count: 36
+            period: hour
+          error_after:
+            count: 72
+            period: hour
+        columns:
+          - name: id
+            tests:
+              - not_null
+          - name: symbol
+            tests:
+              - not_null
+          - name: name
+            tests:
+              - not_null
+          - name: current_price
+            tests:
+              - not_null
+          - name: ingestion_ts
+            tests:
+              - not_null
+          - name: source
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["coingecko_api"]
+          - name: batch_id
+            description: Populated for post-migration batches; legacy rows can be null.

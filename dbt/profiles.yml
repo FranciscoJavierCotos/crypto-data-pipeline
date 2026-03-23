@@ -1,0 +1,12 @@
+coingecko_databricks:
+  target: "{{ env_var('DBT_TARGET', 'prod') }}"
+  outputs:
+    prod:
+      type: databricks
+      method: http
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      catalog: "{{ env_var('DATABRICKS_CATALOG', 'main') }}"
+      schema: "{{ env_var('DBT_TARGET_SCHEMA', env_var('DATABRICKS_SCHEMA', 'analytics')) }}"
+      threads: 4

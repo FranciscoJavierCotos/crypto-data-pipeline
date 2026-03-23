@@ -1,0 +1,16 @@
+version: 2
+
+models:
+  - name: silver_coingecko_latest
+    description: Latest record per coin from bronze landing data.
+    columns:
+      - name: id
+        tests:
+          - not_null
+          - unique
+      - name: symbol
+        tests:
+          - not_null
+      - name: ingestion_ts
+        tests:
+          - not_null

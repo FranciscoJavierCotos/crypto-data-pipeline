@@ -27,6 +27,7 @@ config/*.generated
 # dbt local profiles, dependencies, and build artifacts
 .dbt/
 profiles.yml
+!dbt/profiles.yml
 dbt_packages/
 target/
 

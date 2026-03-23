@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk.bases.hook import BaseHook
 from datetime import datetime, timezone
 import requests
@@ -7,6 +8,7 @@ import pandas as pd
 import os
 import json
 import time
+import uuid
 from urllib.parse import urlparse
 from databricks import sql
 
@@ -40,22 +42,57 @@ def _chunk_records(records, batch_size):
         yield records[start : start + batch_size]
 
 
+def _validate_coingecko_payload(data, required_columns):
+    if not isinstance(data, list):
+        raise ValueError("CoinGecko payload must be a list of coin records")
+    if not data:
+        raise ValueError("CoinGecko payload is empty")
+
+    missing_columns = set()
+    for index, row in enumerate(data):
+        if not isinstance(row, dict):
+            raise ValueError(f"CoinGecko payload row {index} is not a JSON object")
+        for column in required_columns:
+            if column not in row:
+                missing_columns.add(column)
+
+    if missing_columns:
+        raise ValueError(
+            "CoinGecko payload is missing expected fields: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+
 def _insert_records_in_batches(cursor, table_name, records, batch_size=200):
     if not records:
         return
 
     columns_sql = (
         "(id, symbol, name, current_price, market_cap, total_volume, high_24h, low_24h, "
-        "price_change_24h, price_change_percentage_24h, last_updated, raw_json, ingestion_ts, source)"
+        "price_change_24h, price_change_percentage_24h, last_updated, raw_json, ingestion_ts, source, batch_id)"
     )
 
-    row_placeholder = "(" + ", ".join(["?"] * 14) + ")"
+    row_placeholder = "(" + ", ".join(["?"] * 15) + ")"
 
     for batch in _chunk_records(records, batch_size):
         values_sql = ", ".join([row_placeholder] * len(batch))
         insert_sql = f"INSERT INTO {table_name} {columns_sql} VALUES {values_sql}"
         flat_params = [value for row in batch for value in row]
         cursor.execute(insert_sql, flat_params)
+
+
+def _ensure_columns_exist(cursor, table_name, columns_with_types):
+    for column_name, column_type in columns_with_types:
+        try:
+            cursor.execute(
+                f"""
+                ALTER TABLE {table_name}
+                ADD COLUMNS ({column_name} {column_type})
+                """
+            )
+        except Exception as exc:
+            if "already exists" not in str(exc).lower():
+                raise
 
 
 def _get_databricks_connection_params():
@@ -130,21 +167,24 @@ def fetch_coingecko_data():
     print(f"CoinGecko API call completed in {time.perf_counter() - api_start:.2f}s")
 
     data = response.json()
-    df = pd.DataFrame(data)
 
     columns_to_keep = [
         "id", "symbol", "name", "current_price", "market_cap",
         "total_volume", "high_24h", "low_24h", "price_change_24h",
         "price_change_percentage_24h", "last_updated"
     ]
+    _validate_coingecko_payload(data, columns_to_keep)
+
+    df = pd.DataFrame(data)
     df = df[columns_to_keep]
 
     ingestion_ts = datetime.now(timezone.utc)
+    batch_id = str(uuid.uuid4())
     source = "coingecko_api"
 
     connection_params = _get_databricks_connection_params()
     catalog = os.getenv("DATABRICKS_CATALOG", "main")
-    schema = os.getenv("DATABRICKS_SCHEMA", "analytics")
+    schema = os.getenv("DATABRICKS_SCHEMA", "bronze")
     table = os.getenv("DATABRICKS_TABLE", "coingecko_market_data")
     schema_name = _qualified_schema_name(catalog, schema)
     table_name = _qualified_table_name(catalog, schema, table)
@@ -176,26 +216,23 @@ def fetch_coingecko_data():
                         last_updated TIMESTAMP,
                         raw_json STRING,
                         ingestion_ts TIMESTAMP,
-                        source STRING
+                        source STRING,
+                        batch_id STRING
                     )
                     USING DELTA
                     """
                 )
-                # Make sure existing tables are upgraded with landing metadata columns.
-                try:
-                    cursor.execute(
-                        f"""
-                        ALTER TABLE {table_name}
-                        ADD COLUMNS (
-                            raw_json STRING,
-                            ingestion_ts TIMESTAMP,
-                            source STRING
-                        )
-                        """
-                    )
-                except Exception as exc:
-                    if "already exists" not in str(exc).lower():
-                        raise
+                # Ensure backward-compatible schema upgrades on partially upgraded bronze tables.
+                _ensure_columns_exist(
+                    cursor,
+                    table_name,
+                    [
+                        ("raw_json", "STRING"),
+                        ("ingestion_ts", "TIMESTAMP"),
+                        ("source", "STRING"),
+                        ("batch_id", "STRING"),
+                    ],
+                )
                 print(f"DDL checks completed in {time.perf_counter() - ddl_start:.2f}s")
 
                 records = []
@@ -206,11 +243,24 @@ def fetch_coingecko_data():
                             json.dumps(raw_row),
                             ingestion_ts,
                             source,
+                            batch_id,
                         )
                     )
                 insert_start = time.perf_counter()
                 _insert_records_in_batches(cursor, table_name, records, batch_size=200)
                 print(f"Inserted batch in {time.perf_counter() - insert_start:.2f}s")
+
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM {table_name} WHERE batch_id = ?",
+                    [batch_id],
+                )
+                inserted_count_row = cursor.fetchone()
+                inserted_count = inserted_count_row[0] if inserted_count_row else 0
+                if inserted_count != len(records):
+                    raise RuntimeError(
+                        f"Inserted row count mismatch for batch {batch_id}: "
+                        f"expected {len(records)}, found {inserted_count}"
+                    )
     except Exception as exc:
         error_text = str(exc).lower()
         if "403" in error_text or "forbidden" in error_text:
@@ -222,6 +272,8 @@ def fetch_coingecko_data():
 
     print(f"Total pipeline task runtime: {time.perf_counter() - total_start:.2f}s")
     print(f"Inserted {len(df)} rows into {catalog}.{schema}.{table}")
+    print(f"Ingestion batch_id: {batch_id}")
+    return batch_id
 
 
 default_args = {
@@ -237,9 +289,19 @@ with DAG(
     catchup=False,
 ) as dag:
 
-    fetch_task = PythonOperator(
-        task_id="fetch_coingecko_data",
+    ingest_bronze_task = PythonOperator(
+        task_id="ingest_coingecko_to_bronze",
         python_callable=fetch_coingecko_data,
     )
 
-    fetch_task
+    trigger_quality_after_ingestion = TriggerDagRunOperator(
+        task_id="trigger_quality_after_ingestion",
+        trigger_dag_id="coingecko_quality_pipeline",
+        conf={
+            "layer": "bronze",
+            "batch_id": "{{ ti.xcom_pull(task_ids='ingest_coingecko_to_bronze') }}",
+            "fail_on_non_critical": False,
+        },
+    )
+
+    ingest_bronze_task >> trigger_quality_after_ingestion
