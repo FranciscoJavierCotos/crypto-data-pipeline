@@ -1,8 +1,8 @@
-{% set batch_id = var('batch_id', '') %}
+{% set run_key = var('run_key', '') %}
 
 with invalid_metrics as (
     select
-        batch_id,
+    run_key,
         id,
         current_price,
         market_cap,
@@ -10,7 +10,7 @@ with invalid_metrics as (
         high_24h,
         low_24h
     from {{ source('bronze', 'coingecko_market_data') }}
-    where batch_id = '{{ batch_id }}'
+    where run_key = '{{ run_key }}'
       and (
         current_price < 0
         or market_cap < 0

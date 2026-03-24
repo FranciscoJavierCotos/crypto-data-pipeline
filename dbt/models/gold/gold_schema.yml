@@ -1,15 +1,40 @@
 version: 2
 
 models:
-  - name: gold_market_snapshot
-    description: Daily aggregate KPI snapshot from silver market data.
+  - name: gold_volatility_signal
+    description: Volatility signal output for high range over price movements by asset and date.
     columns:
-      - name: snapshot_date
+      - name: id
         tests:
           - not_null
-      - name: active_coins
+      - name: metric_date
         tests:
           - not_null
-      - name: latest_ingestion_ts
+      - name: volatility_signal
+      - name: volatility_bucket
+
+  - name: gold_sentiment_vs_price
+    description: Sentiment vs. next-day price change analytical output.
+    columns:
+      - name: id
         tests:
           - not_null
+      - name: metric_date
+        tests:
+          - not_null
+      - name: fear_greed_value
+      - name: fear_greed_label
+      - name: next_day_price_change_pct
+
+  - name: gold_liquidity_ranking
+    description: Liquidity ranking output with anomaly flag based on volume to market cap ratio.
+    columns:
+      - name: id
+        tests:
+          - not_null
+      - name: metric_date
+        tests:
+          - not_null
+      - name: volume_to_market_cap_ratio
+      - name: liquidity_rank
+      - name: high_cap_anomaly_flag

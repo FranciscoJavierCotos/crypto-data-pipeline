@@ -1,22 +1,29 @@
 from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 from datetime import datetime, timedelta
+from pipeline_callbacks import task_failure_alert, sla_miss_alert
 
 
 default_args = {
     "owner": "airflow",
     "start_date": datetime(2025, 3, 21),
-    "retries": 0,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
+    "on_failure_callback": task_failure_alert,
+    "sla": timedelta(hours=1),
 }
 
 with DAG(
-    dag_id="coingecko_quality_pipeline",
+    dag_id="crypto_data_quality_pipeline",
     default_args=default_args,
     schedule=None,
     catchup=False,
+    sla_miss_callback=sla_miss_alert,
     params={
         "layer": "all",
-        "batch_id": "",
+        "run_key": "",
         "fail_on_non_critical": False,
     },
 ) as dag:
@@ -57,7 +64,7 @@ with DAG(
             export DATABRICKS_AUTH_TYPE="${DATABRICKS_AUTH_TYPE:-pat}"
 
             LAYER='{{ (dag_run.conf.get("layer", params.layer) if dag_run and dag_run.conf else params.layer) | lower }}'
-            BATCH_ID='{{ dag_run.conf.get("batch_id", params.batch_id) if dag_run and dag_run.conf else params.batch_id }}'
+            RUN_KEY='{{ dag_run.conf.get("run_key", params.run_key) if dag_run and dag_run.conf else params.run_key }}'
             FAIL_ON_NON_CRITICAL='{{ dag_run.conf.get("fail_on_non_critical", params.fail_on_non_critical) if dag_run and dag_run.conf else params.fail_on_non_critical }}'
 
             case "$LAYER" in
@@ -89,9 +96,9 @@ with DAG(
                     --select "$@"
                 )
 
-                # Bronze batch tests require a batch_id; only pass vars when available.
-                if [ -n "$BATCH_ID" ]; then
-                    DBT_CMD+=(--vars "{batch_id: '$BATCH_ID'}")
+                # Bronze run-scoped tests require a run_key; only pass vars when available.
+                if [ -n "$RUN_KEY" ]; then
+                    DBT_CMD+=(--vars "{run_key: '$RUN_KEY'}")
                 fi
 
                 echo "Running $TEST_CLASS dbt tests for layer=$LAYER"
@@ -117,18 +124,23 @@ with DAG(
             NON_CRITICAL_SELECTORS=()
 
             if [ "$LAYER" = "bronze" ] || [ "$LAYER" = "all" ]; then
-                if [ -z "$BATCH_ID" ]; then
-                    echo "batch_id is required for bronze quality checks. Provide it in DAG run config."
+                if [ -z "$RUN_KEY" ]; then
+                    echo "run_key is required for bronze quality checks. Provide it in DAG run config."
                     exit 1
                 fi
 
                 CRITICAL_SELECTORS+=(
                     path:tests/bronze/bronze_batch_has_data.sql
                     path:tests/bronze/bronze_batch_no_duplicate_coin_ids.sql
+                    path:tests/bronze/bronze_fear_greed_no_duplicate_metric_date.sql
+                    path:tests/bronze/bronze_fear_greed_value_range.sql
                     path:tests/bronze/bronze_batch_no_empty_required_fields.sql
+                    path:tests/bronze/bronze_batch_price_bounds_consistent.sql
                 )
                 NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_numeric_values_sane.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_no_future_timestamps.sql)
                 NON_CRITICAL_SELECTORS+=(path:models/Sources)
+                NON_CRITICAL_SELECTORS+=(path:models/bronze)
             fi
 
             if [ "$LAYER" = "silver" ] || [ "$LAYER" = "all" ]; then

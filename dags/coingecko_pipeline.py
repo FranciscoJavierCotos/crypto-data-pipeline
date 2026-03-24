@@ -2,15 +2,14 @@ from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk.bases.hook import BaseHook
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
-import pandas as pd
 import os
 import json
 import time
-import uuid
 from urllib.parse import urlparse
 from databricks import sql
+from pipeline_callbacks import task_failure_alert, sla_miss_alert
 
 
 def _quote_identifier(identifier):
@@ -63,22 +62,117 @@ def _validate_coingecko_payload(data, required_columns):
         )
 
 
-def _insert_records_in_batches(cursor, table_name, records, batch_size=200):
+def _safe_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_iso8601_timestamp(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        normalized_value = value.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized_value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _get_stable_run_key(default_prefix):
+    dag_run_id = (os.getenv("AIRFLOW_CTX_DAG_RUN_ID") or "").strip()
+    dag_id = (os.getenv("AIRFLOW_CTX_DAG_ID") or default_prefix).strip() or default_prefix
+
+    if dag_run_id:
+        return f"{dag_id}:{dag_run_id}"
+
+    # Fallback is only used outside Airflow task context (for local/debug execution).
+    generated_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"{dag_id}:manual:{generated_suffix}"
+
+
+def _merge_records_in_batches(cursor, table_name, records, batch_size=200):
     if not records:
         return
 
-    columns_sql = (
-        "(id, symbol, name, current_price, market_cap, total_volume, high_24h, low_24h, "
-        "price_change_24h, price_change_percentage_24h, last_updated, raw_json, ingestion_ts, source, batch_id)"
-    )
+    column_names = [
+        "id",
+        "symbol",
+        "name",
+        "current_price",
+        "market_cap",
+        "total_volume",
+        "high_24h",
+        "low_24h",
+        "price_change_24h",
+        "price_change_percentage_24h",
+        "market_cap_rank",
+        "fully_diluted_valuation",
+        "market_cap_change_24h",
+        "market_cap_change_percentage_24h",
+        "circulating_supply",
+        "total_supply",
+        "max_supply",
+        "ath",
+        "ath_change_percentage",
+        "ath_date",
+        "atl",
+        "atl_change_percentage",
+        "atl_date",
+        "volume_to_market_cap_ratio",
+        "last_updated",
+        "raw_json",
+        "ingestion_ts",
+        "source",
+        "run_key",
+    ]
 
-    row_placeholder = "(" + ", ".join(["?"] * 15) + ")"
+    row_placeholder = "(" + ", ".join(["?"] * len(column_names)) + ")"
+    source_columns_sql = ", ".join(column_names)
+    update_columns = [name for name in column_names if name not in {"id", "run_key"}]
+    update_assignments_sql = ", ".join(
+        [f"target.{column_name} = source.{column_name}" for column_name in update_columns]
+    )
+    insert_columns_sql = ", ".join(column_names)
+    insert_values_sql = ", ".join([f"source.{column_name}" for column_name in column_names])
 
     for batch in _chunk_records(records, batch_size):
         values_sql = ", ".join([row_placeholder] * len(batch))
-        insert_sql = f"INSERT INTO {table_name} {columns_sql} VALUES {values_sql}"
+        merge_sql = f"""
+            MERGE INTO {table_name} AS target
+            USING (
+                SELECT *
+                FROM VALUES {values_sql}
+            ) AS source ({source_columns_sql})
+            ON target.id = source.id AND target.run_key = source.run_key
+            WHEN MATCHED THEN
+              UPDATE SET {update_assignments_sql}
+            WHEN NOT MATCHED THEN
+              INSERT ({insert_columns_sql})
+              VALUES ({insert_values_sql})
+        """
         flat_params = [value for row in batch for value in row]
-        cursor.execute(insert_sql, flat_params)
+        cursor.execute(merge_sql, flat_params)
 
 
 def _ensure_columns_exist(cursor, table_name, columns_with_types):
@@ -168,18 +262,15 @@ def fetch_coingecko_data():
 
     data = response.json()
 
-    columns_to_keep = [
+    required_columns = [
         "id", "symbol", "name", "current_price", "market_cap",
         "total_volume", "high_24h", "low_24h", "price_change_24h",
         "price_change_percentage_24h", "last_updated"
     ]
-    _validate_coingecko_payload(data, columns_to_keep)
-
-    df = pd.DataFrame(data)
-    df = df[columns_to_keep]
+    _validate_coingecko_payload(data, required_columns)
 
     ingestion_ts = datetime.now(timezone.utc)
-    batch_id = str(uuid.uuid4())
+    run_key = _get_stable_run_key(default_prefix="coingecko_pipeline")
     source = "coingecko_api"
 
     connection_params = _get_databricks_connection_params()
@@ -213,11 +304,25 @@ def fetch_coingecko_data():
                         low_24h DOUBLE,
                         price_change_24h DOUBLE,
                         price_change_percentage_24h DOUBLE,
+                        market_cap_rank INT,
+                        fully_diluted_valuation DOUBLE,
+                        market_cap_change_24h DOUBLE,
+                        market_cap_change_percentage_24h DOUBLE,
+                        circulating_supply DOUBLE,
+                        total_supply DOUBLE,
+                        max_supply DOUBLE,
+                        ath DOUBLE,
+                        ath_change_percentage DOUBLE,
+                        ath_date TIMESTAMP,
+                        atl DOUBLE,
+                        atl_change_percentage DOUBLE,
+                        atl_date TIMESTAMP,
+                        volume_to_market_cap_ratio DOUBLE,
                         last_updated TIMESTAMP,
                         raw_json STRING,
                         ingestion_ts TIMESTAMP,
                         source STRING,
-                        batch_id STRING
+                        run_key STRING
                     )
                     USING DELTA
                     """
@@ -227,38 +332,87 @@ def fetch_coingecko_data():
                     cursor,
                     table_name,
                     [
+                        ("market_cap_rank", "INT"),
+                        ("fully_diluted_valuation", "DOUBLE"),
+                        ("market_cap_change_24h", "DOUBLE"),
+                        ("market_cap_change_percentage_24h", "DOUBLE"),
+                        ("circulating_supply", "DOUBLE"),
+                        ("total_supply", "DOUBLE"),
+                        ("max_supply", "DOUBLE"),
+                        ("ath", "DOUBLE"),
+                        ("ath_change_percentage", "DOUBLE"),
+                        ("ath_date", "TIMESTAMP"),
+                        ("atl", "DOUBLE"),
+                        ("atl_change_percentage", "DOUBLE"),
+                        ("atl_date", "TIMESTAMP"),
+                        ("volume_to_market_cap_ratio", "DOUBLE"),
                         ("raw_json", "STRING"),
                         ("ingestion_ts", "TIMESTAMP"),
                         ("source", "STRING"),
-                        ("batch_id", "STRING"),
+                        ("run_key", "STRING"),
                     ],
                 )
                 print(f"DDL checks completed in {time.perf_counter() - ddl_start:.2f}s")
 
-                records = []
-                for row_tuple, raw_row in zip(df.itertuples(index=False, name=None), data):
-                    records.append(
-                        tuple(row_tuple)
-                        + (
-                            json.dumps(raw_row),
-                            ingestion_ts,
-                            source,
-                            batch_id,
-                        )
+                records_by_id = {}
+                for raw_row in data:
+                    market_cap_value = _safe_float(raw_row.get("market_cap"))
+                    total_volume_value = _safe_float(raw_row.get("total_volume"))
+                    # The ratio is undefined when market cap is null/zero, so we persist NULL.
+                    volume_to_market_cap_ratio = (
+                        (total_volume_value / market_cap_value)
+                        if market_cap_value not in (None, 0)
+                        and total_volume_value is not None
+                        else None
                     )
-                insert_start = time.perf_counter()
-                _insert_records_in_batches(cursor, table_name, records, batch_size=200)
-                print(f"Inserted batch in {time.perf_counter() - insert_start:.2f}s")
+                    coin_id = raw_row.get("id")
+                    if coin_id is None:
+                        continue
+                    records_by_id[coin_id] = (
+                        coin_id,
+                        raw_row.get("symbol"),
+                        raw_row.get("name"),
+                        _safe_float(raw_row.get("current_price")),
+                        _safe_int(raw_row.get("market_cap")),
+                        _safe_int(raw_row.get("total_volume")),
+                        _safe_float(raw_row.get("high_24h")),
+                        _safe_float(raw_row.get("low_24h")),
+                        _safe_float(raw_row.get("price_change_24h")),
+                        _safe_float(raw_row.get("price_change_percentage_24h")),
+                        _safe_int(raw_row.get("market_cap_rank")),
+                        _safe_float(raw_row.get("fully_diluted_valuation")),
+                        _safe_float(raw_row.get("market_cap_change_24h")),
+                        _safe_float(raw_row.get("market_cap_change_percentage_24h")),
+                        _safe_float(raw_row.get("circulating_supply")),
+                        _safe_float(raw_row.get("total_supply")),
+                        _safe_float(raw_row.get("max_supply")),
+                        _safe_float(raw_row.get("ath")),
+                        _safe_float(raw_row.get("ath_change_percentage")),
+                        _parse_iso8601_timestamp(raw_row.get("ath_date")),
+                        _safe_float(raw_row.get("atl")),
+                        _safe_float(raw_row.get("atl_change_percentage")),
+                        _parse_iso8601_timestamp(raw_row.get("atl_date")),
+                        volume_to_market_cap_ratio,
+                        _parse_iso8601_timestamp(raw_row.get("last_updated")),
+                        json.dumps(raw_row),
+                        ingestion_ts,
+                        source,
+                        run_key,
+                    )
+                records = list(records_by_id.values())
+                merge_start = time.perf_counter()
+                _merge_records_in_batches(cursor, table_name, records, batch_size=200)
+                print(f"Merged batch in {time.perf_counter() - merge_start:.2f}s")
 
                 cursor.execute(
-                    f"SELECT COUNT(*) FROM {table_name} WHERE batch_id = ?",
-                    [batch_id],
+                    f"SELECT COUNT(*) FROM {table_name} WHERE run_key = ?",
+                    [run_key],
                 )
                 inserted_count_row = cursor.fetchone()
                 inserted_count = inserted_count_row[0] if inserted_count_row else 0
                 if inserted_count != len(records):
                     raise RuntimeError(
-                        f"Inserted row count mismatch for batch {batch_id}: "
+                        f"Merged row count mismatch for run_key {run_key}: "
                         f"expected {len(records)}, found {inserted_count}"
                     )
     except Exception as exc:
@@ -271,35 +425,45 @@ def fetch_coingecko_data():
         raise
 
     print(f"Total pipeline task runtime: {time.perf_counter() - total_start:.2f}s")
-    print(f"Inserted {len(df)} rows into {catalog}.{schema}.{table}")
-    print(f"Ingestion batch_id: {batch_id}")
-    return batch_id
+    print(f"Inserted {len(records)} rows into {catalog}.{schema}.{table}")
+    print(f"Ingestion run_key: {run_key}")
+    return run_key
 
 
 default_args = {
     "owner": "airflow",
     "start_date": datetime(2025, 3, 21),
-    "retries": 1,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=3),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=20),
+    "on_failure_callback": task_failure_alert,
+    "sla": timedelta(hours=1),
 }
 
 with DAG(
     dag_id="coingecko_pipeline",
     default_args=default_args,
-    schedule="@daily",
+    schedule=None,
     catchup=False,
+    sla_miss_callback=sla_miss_alert,
 ) as dag:
 
     ingest_bronze_task = PythonOperator(
         task_id="ingest_coingecko_to_bronze",
         python_callable=fetch_coingecko_data,
+        execution_timeout=timedelta(minutes=15),
     )
 
     trigger_quality_after_ingestion = TriggerDagRunOperator(
         task_id="trigger_quality_after_ingestion",
-        trigger_dag_id="coingecko_quality_pipeline",
+        trigger_dag_id="crypto_data_quality_pipeline",
+        wait_for_completion=True,
+        allowed_states=["success"],
+        failed_states=["failed", "upstream_failed"],
         conf={
             "layer": "bronze",
-            "batch_id": "{{ ti.xcom_pull(task_ids='ingest_coingecko_to_bronze') }}",
+            "run_key": "{{ ti.xcom_pull(task_ids='ingest_coingecko_to_bronze') }}",
             "fail_on_non_critical": False,
         },
     )

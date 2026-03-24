@@ -1,15 +1,17 @@
 {% set run_key = var('run_key', '') %}
 
-with duplicated as (
+with invalid_bounds as (
     select
         run_key,
         id,
-        count(*) as duplicate_count
+        high_24h,
+        low_24h
     from {{ source('bronze', 'coingecko_market_data') }}
     where run_key = '{{ run_key }}'
-    group by run_key, id
-    having count(*) > 1
+      and high_24h is not null
+      and low_24h is not null
+      and high_24h < low_24h
 )
 
 select *
-from duplicated
+from invalid_bounds

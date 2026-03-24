@@ -1,11 +1,11 @@
-{% set batch_id = var('batch_id', '') %}
+{% set run_key = var('run_key', '') %}
 
 with batch_stats as (
     select
-        '{{ batch_id }}' as expected_batch_id,
+        '{{ run_key }}' as expected_run_key,
         count(*) as row_count
     from {{ source('bronze', 'coingecko_market_data') }}
-    where batch_id = '{{ batch_id }}'
+    where run_key = '{{ run_key }}'
 )
 
 select *

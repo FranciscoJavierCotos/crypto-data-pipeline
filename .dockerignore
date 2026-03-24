@@ -1,0 +1,25 @@
+# VCS and editor
+.git
+.gitignore
+.vscode
+
+# Python
+.venv
+__pycache__
+*.py[cod]
+*.pyo
+*.pyd
+
+# Airflow runtime artifacts
+logs
+data
+plugins/__pycache__
+
+# dbt artifacts
+dbt/target
+dbt/logs
+dbt/dbt_packages
+
+# OS noise
+.DS_Store
+Thumbs.db

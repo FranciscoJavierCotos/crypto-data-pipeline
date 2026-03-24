@@ -2,12 +2,18 @@ from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from datetime import datetime, timedelta
+from pipeline_callbacks import task_failure_alert, sla_miss_alert
 
 
 default_args = {
     "owner": "airflow",
     "start_date": datetime(2025, 3, 21),
-    "retries": 1,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
+    "on_failure_callback": task_failure_alert,
+    "sla": timedelta(hours=1),
 }
 
 with DAG(
@@ -15,6 +21,7 @@ with DAG(
     default_args=default_args,
     schedule=None,
     catchup=False,
+    sla_miss_callback=sla_miss_alert,
 ) as dag:
 
     run_dbt_gold_transformations = BashOperator(
@@ -77,7 +84,10 @@ with DAG(
 
     trigger_quality_after_gold = TriggerDagRunOperator(
         task_id="trigger_quality_after_gold",
-        trigger_dag_id="coingecko_quality_pipeline",
+        trigger_dag_id="crypto_data_quality_pipeline",
+        wait_for_completion=True,
+        allowed_states=["success"],
+        failed_states=["failed", "upstream_failed"],
         conf={
             "layer": "gold",
             "fail_on_non_critical": True,

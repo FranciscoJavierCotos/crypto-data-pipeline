@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: stg_bronze_coingecko_market_data
+    description: Bronze contract view over coingecko_market_data source.
+    columns:
+      - name: id
+        tests:
+          - not_null
+      - name: run_key
+        tests:
+          - not_null
+      - name: ingestion_ts
+        tests:
+          - not_null
+
+  - name: stg_bronze_fear_greed_raw
+    description: Bronze contract view over fear_greed_raw source.
+    columns:
+      - name: metric_date
+        tests:
+          - not_null
+      - name: run_key
+        tests:
+          - not_null
+      - name: ingestion_ts
+        tests:
+          - not_null

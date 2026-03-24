@@ -1,8 +1,8 @@
-{% set batch_id = var('batch_id', '') %}
+{% set run_key = var('run_key', '') %}
 
 with invalid_rows as (
     select
-        batch_id,
+    run_key,
         id,
         symbol,
         name,
@@ -10,9 +10,9 @@ with invalid_rows as (
         last_updated,
         ingestion_ts
     from {{ source('bronze', 'coingecko_market_data') }}
-    where batch_id = '{{ batch_id }}'
+    where run_key = '{{ run_key }}'
       and (
-        trim(coalesce(batch_id, '')) = ''
+        trim(coalesce(run_key, '')) = ''
         or trim(coalesce(id, '')) = ''
         or trim(coalesce(symbol, '')) = ''
         or trim(coalesce(name, '')) = ''

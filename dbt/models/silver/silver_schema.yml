@@ -1,16 +1,20 @@
 version: 2
 
 models:
-  - name: silver_coingecko_latest
-    description: Latest record per coin from bronze landing data.
+  - name: dim_crypto_daily
+    description: Silver daily crypto dimension joined with fear and greed sentiment.
     columns:
       - name: id
         tests:
           - not_null
-          - unique
-      - name: symbol
+      - name: metric_date
         tests:
           - not_null
+      - name: market_cap_rank
+      - name: circulating_supply
+      - name: volume_to_market_cap_ratio
+      - name: fear_greed_value
+      - name: fear_greed_label
       - name: ingestion_ts
         tests:
           - not_null

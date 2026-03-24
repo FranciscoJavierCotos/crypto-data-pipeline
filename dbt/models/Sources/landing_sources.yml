@@ -7,7 +7,7 @@ sources:
     schema: "{{ env_var('DATABRICKS_SCHEMA', 'bronze') }}"
     tables:
       - name: coingecko_market_data
-        description: Raw CoinGecko payload and selected market fields captured per ingestion batch.
+        description: Raw CoinGecko payload and selected market fields captured per ingestion run.
         loaded_at_field: ingestion_ts
         freshness:
           warn_after:
@@ -38,5 +38,52 @@ sources:
               - accepted_values:
                   arguments:
                     values: ["coingecko_api"]
-          - name: batch_id
-            description: Populated for post-migration batches; legacy rows can be null.
+          - name: run_key
+            description: Stable Airflow run identifier used for idempotent upserts.
+            tests:
+              - not_null
+
+      - name: fear_greed_raw
+        description: Daily fear and greed metric ingested from Alternative.me.
+        loaded_at_field: ingestion_ts
+        freshness:
+          warn_after:
+            count: 36
+            period: hour
+          error_after:
+            count: 72
+            period: hour
+        columns:
+          - name: value
+            tests:
+              - not_null
+          - name: value_classification
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values:
+                      [
+                        "Extreme Fear",
+                        "Fear",
+                        "Neutral",
+                        "Greed",
+                        "Extreme Greed",
+                      ]
+          - name: metric_date
+            tests:
+              - not_null
+              - unique
+          - name: ingestion_ts
+            tests:
+              - not_null
+          - name: source
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["alternative_me_api"]
+          - name: run_key
+            description: Stable Airflow run identifier used for idempotent upserts.
+            tests:
+              - not_null

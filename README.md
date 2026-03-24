@@ -87,7 +87,22 @@ At runtime, Docker Compose mounts `./dbt` into Airflow containers at `/opt/airfl
 
 1. Copy `airflow-docker/.env.example` to `airflow-docker/.env`.
 2. Fill in real Databricks values in `.env` (`DATABRICKS_HOST`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_TOKEN`, and `AIRFLOW_CONN_DATABRICKS_DEFAULT`).
-3. Do not commit `.env` or PAT tokens.
+3. Set strong values for `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `_AIRFLOW_WWW_USER_PASSWORD`, `AIRFLOW__CORE__FERNET_KEY`, and `AIRFLOW__API_AUTH__JWT_SECRET`.
+4. Keep `AIRFLOW__CORE__AUTH_MANAGER` on FAB for production.
+5. Do not commit `.env` or PAT tokens.
+
+### Centralized Secrets Backend (Production)
+
+For production, prefer external secret stores over local `.env` secrets.
+
+Set in `.env`:
+
+```bash
+AIRFLOW__SECRETS__BACKEND=airflow.providers.amazon.aws.secrets.secrets_manager.SecretsManagerBackend
+AIRFLOW__SECRETS__BACKEND_KWARGS={"connections_prefix":"airflow/connections","variables_prefix":"airflow/variables","region_name":"us-east-1"}
+```
+
+With a secrets backend enabled, keep runtime secrets in the secret manager and avoid storing credentials in `airflow.cfg`.
 
 `dbt/profiles.yml` is safe to version because it reads credentials from environment variables only.
 
@@ -103,19 +118,12 @@ docker compose up airflow-init
 docker compose up -d
 ```
 
-To verify dbt in the Airflow image:
-
-```bash
-docker compose run --rm airflow-cli bash -lc "dbt --version"
-docker compose run --rm airflow-cli bash -lc "cd /opt/airflow/dbt && dbt debug --target ${DBT_TARGET:-prod}"
-```
-
 Pipeline orchestration is now split into four DAGs:
 
 1. `coingecko_pipeline`
 2. `coingecko_silver_transformations_pipeline`
 3. `coingecko_gold_transformations_pipeline`
-4. `coingecko_quality_pipeline`
+4. `crypto_data_quality_pipeline`
 
 `coingecko_pipeline` includes only:
 
@@ -133,30 +141,4 @@ Pipeline orchestration is now split into four DAGs:
 1. `run_dbt_gold_transformations`
 2. `trigger_quality_after_gold`
 
-`coingecko_quality_pipeline` runs dbt quality checks and is triggered automatically after both ingestion and transformation DAGs. It can also be triggered independently/manual when needed.
-
-### Trigger Quality DAG With Run Config
-
-Use Airflow UI Trigger DAG and pass JSON config in `dag_run.conf`.
-
-Run all layers (bronze + silver + gold) for a specific batch:
-
-```json
-{
-  "layer": "all",
-  "batch_id": "<your_ingestion_batch_id>",
-  "fail_on_non_critical": false
-}
-```
-
-Run only silver checks:
-
-```json
-{
-  "layer": "silver",
-  "fail_on_non_critical": true
-}
-```
-
-Supported `layer` values are `bronze`, `silver`, `gold`, and `all`.
-For `bronze` and `all`, `batch_id` is required because bronze tests are batch-scoped.
+`crypto_data_quality_pipeline` runs dbt quality checks and is triggered automatically after both ingestion and transformation DAGs. It can also be triggered independently/manual when needed.
