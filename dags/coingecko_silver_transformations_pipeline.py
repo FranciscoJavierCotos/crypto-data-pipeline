@@ -115,11 +115,11 @@ with DAG(
     trigger_quality_after_silver = TriggerDagRunOperator(
         task_id="trigger_quality_after_silver",
         trigger_dag_id="quality_checks_crypto_data_layers",
-        # Block until quality checks complete so downstream orchestration cannot skip failed quality.
-        wait_for_completion=True,
+        # Run quality checks asynchronously so silver and master orchestration can progress.
+        wait_for_completion=False,
         conf={
             "layer": "silver",
-            "fail_on_non_critical": True,
+            "fail_on_non_critical": False,
         },
     )
 

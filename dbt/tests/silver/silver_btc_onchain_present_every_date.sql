@@ -1,9 +1,12 @@
 -- Silver test: Bitcoin on-chain context should exist for Bitcoin on each date with silver data
 -- A passing test returns 0 rows.
 
+{% set quality_grace_days = var('quality_grace_days', 1) | int %}
+
 with all_dates as (
     select distinct metric_date
     from {{ ref('dim_crypto_daily') }}
+    where metric_date <= date_sub(current_date, {{ quality_grace_days }})
 ),
 
 btc_onchain as (

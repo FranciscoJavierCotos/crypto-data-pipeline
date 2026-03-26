@@ -1,116 +1,81 @@
-# 🚀 Coingecko Data Pipeline
+# Crypto Data Pipeline (Airflow + Databricks + dbt)
 
-**End-to-end crypto data pipeline fetching CoinGecko data, containerized Airflow, Databricks, DBT, and medallion architecture.**
+Production-style data engineering project that ingests crypto market, sentiment, and on-chain data into a medallion architecture with automated quality checks.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Container-blue)](https://www.docker.com/)
 [![Databricks](https://img.shields.io/badge/Databricks-Processing-orange)](https://databricks.com/)
-[![DBT](https://img.shields.io/badge/DBT-Transformations-orange)](https://www.getdbt.com/)
+[![dbt](https://img.shields.io/badge/dbt-Transformations-orange)](https://www.getdbt.com/)
 [![Airflow](https://img.shields.io/badge/Airflow-Orchestration-blue)](https://airflow.apache.org/)
 
----
+## 30-Second Snapshot
 
-## 🌟 Project Overview
+If you are a recruiter or hiring manager, here is the value quickly:
 
-This is an **ongoing project** building a **production-ready cryptocurrency data pipeline**.  
-It fetches, processes, and transforms data from the **CoinGecko API** in a **scalable, reliable, and maintainable** way.
+- Built an end-to-end data platform with real orchestration, transformations, and quality gates.
+- Implemented medallion modeling (Bronze -> Silver -> Gold) on Databricks with dbt.
+- Orchestrated independent ingestion + transformation DAGs with an explicit quality DAG.
+- Designed analytics-ready gold models for liquidity, dominance, volatility, and sentiment-vs-price behavior.
+- Added production-minded practices: idempotent loads, test layering (critical/non-critical), secrets strategy, and containerized local runtime.
 
-Key goals:
+## Why This Project Matters For Data Engineering Roles
 
-- Scheduled and automated **data ingestion** from CoinGecko
-- End-to-end **pipeline design** with modern tools
-- **Medallion architecture layers**: Bronze → Silver → Gold
-- **Dockerized Airflow** for reproducibility and portability
-- Automated **tests and monitoring** for pipeline reliability
+- Demonstrates platform thinking, not only SQL scripts.
+- Shows ability to combine Airflow, dbt, Databricks, and API ingestion in one coherent system.
+- Balances data modeling, reliability, and operational concerns.
+- Is interview-friendly: architecture, tradeoffs, and quality strategy are explicit and easy to discuss.
 
----
+## Architecture At A Glance
 
-## 🛠 Tech Stack
+Sources:
 
-| Layer / Component      | Technology          | Purpose                           |
-| ---------------------- | ------------------- | --------------------------------- |
-| Orchestration          | Airflow (Docker)    | Schedule & manage tasks           |
-| Data Processing        | Databricks          | Scalable ETL computations         |
-| Transformations        | DBT                 | Medallion layer transformations   |
-| Data Source            | CoinGecko API       | Cryptocurrency market data        |
-| Storage / Architecture | Medallion Layers    | Bronze, Silver, Gold tables       |
-| CI / Testing           | Pytest / Unit Tests | Ensure data quality & reliability |
+- CoinGecko market data
+- Fear and Greed index
+- Blockchain on-chain BTC metrics
 
----
+Processing pattern:
 
-## ✨ Features
+- Bronze: ingestion-aligned raw landing tables
+- Silver: cleaned, standardized daily crypto features
+- Gold: business-facing analytics models
 
-- Scheduled **CoinGecko API ingestion**
-- **Containerized Airflow** for reproducibility
-- Scalable **Databricks processing**
-- **DBT transformations** with medallion layers
-- **Unit tests & monitoring** for reliability
-- **Extensible architecture** for new crypto data sources
+Orchestration pattern:
 
----
+- Domain DAGs for ingestion and transformations
+- Dedicated quality DAG for dbt tests
+- Parameterized test execution by layer (bronze, silver, gold, all)
 
-## 🚧 Project Status
+## Gold Layer Business Outputs
 
-- [x] CoinGecko API ingestion
-- [x] Dockerized Airflow setup
-- [x] Initial Databricks integration
-- [ ] Full DBT transformations to Gold layer
-- [ ] Automated testing & monitoring
-- [ ] Deployment to production environment
+Main gold models answer practical analytics questions:
 
----
+- gold_liquidity_ranking: Which assets are highly liquid vs potentially fragile?
+- gold_btc_dominance: Is BTC gaining or losing market share relative to total market?
+- gold_volatility_signal: Which assets are entering high-volatility regimes?
+- gold_sentiment_vs_price: How does market sentiment relate to next-day returns?
+- gold_market_summary: Daily KPI view for ranking and tracking assets.
 
-## 💡 Motivation
+## Data Quality Strategy
 
-This project demonstrates my ability to **design and implement production-ready data pipelines**.  
-It showcases:
+- dbt tests are organized by impact:
+  - Critical tests fail the run when core integrity is broken.
+  - Non-critical tests surface warnings without always blocking execution.
+- Quality checks can run per layer for targeted debugging and faster iteration.
+- The quality DAG is integrated into orchestration so data contracts are enforced regularly, not manually.
 
-- Real-world **data engineering skills**
-- Familiarity with **orchestration, ETL, and transformations**
-- Knowledge of **best practices**: medallion architecture, containerization, testing
-- Ability to build **scalable, maintainable pipelines** from scratch
+## Tech Stack
 
----
+| Component         | Tooling          | Role                                          |
+| ----------------- | ---------------- | --------------------------------------------- |
+| Orchestration     | Airflow (Docker) | Scheduling, dependencies, operational control |
+| Transformations   | dbt Core         | Medallion modeling and tests                  |
+| Compute/Warehouse | Databricks SQL   | Storage and scalable execution                |
+| Data Sources      | APIs             | Market, sentiment, on-chain ingestion         |
+| Runtime           | Docker Compose   | Reproducible local environment                |
 
-## 🧱 Repository Structure
+## Fast Start
 
-This repository keeps Airflow and dbt in the same GitHub project:
-
-- `airflow-docker/`: Dockerized Airflow orchestration runtime.
-- `airflow-docker/dbt/`: dbt Core transformations and tests for Databricks.
-
-At runtime, Docker Compose mounts `./dbt` into Airflow containers at `/opt/airflow/dbt`.
-
----
-
-## 🔐 Secure Configuration
-
-1. Copy `airflow-docker/.env.example` to `airflow-docker/.env`.
-2. Fill in real Databricks values in `.env` (`DATABRICKS_HOST`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_TOKEN`, and `AIRFLOW_CONN_DATABRICKS_DEFAULT`).
-3. Set strong values for `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `_AIRFLOW_WWW_USER_PASSWORD`, `AIRFLOW__CORE__FERNET_KEY`, and `AIRFLOW__API_AUTH__JWT_SECRET`.
-4. Keep `AIRFLOW__CORE__AUTH_MANAGER` on FAB for production.
-5. Do not commit `.env` or PAT tokens.
-
-### Centralized Secrets Backend (Production)
-
-For production, prefer external secret stores over local `.env` secrets.
-
-Set in `.env`:
-
-```bash
-AIRFLOW__SECRETS__BACKEND=airflow.providers.amazon.aws.secrets.secrets_manager.SecretsManagerBackend
-AIRFLOW__SECRETS__BACKEND_KWARGS={"connections_prefix":"airflow/connections","variables_prefix":"airflow/variables","region_name":"us-east-1"}
-```
-
-With a secrets backend enabled, keep runtime secrets in the secret manager and avoid storing credentials in `airflow.cfg`.
-
-`dbt/profiles.yml` is safe to version because it reads credentials from environment variables only.
-
----
-
-## ▶️ Run Airflow + dbt
-
-From `airflow-docker/`:
+From airflow-docker:
 
 ```bash
 docker compose build
@@ -118,29 +83,32 @@ docker compose up airflow-init
 docker compose up -d
 ```
 
-Pipeline orchestration uses role-based DAG names:
+Primary DAG flow:
 
-1. `orchestrate_crypto_bronze_silver_gold`
-2. `ingest_bronze_coingecko_market_data`
-3. `ingest_bronze_fear_greed_index`
-4. `ingest_bronze_blockchain_onchain_metrics`
-5. `transform_silver_crypto_models`
-6. `transform_gold_crypto_models`
-7. `quality_checks_crypto_data_layers`
+1. orchestrate_crypto_bronze_silver_gold
+2. ingest_bronze_coingecko_market_data
+3. ingest_bronze_fear_greed_index
+4. ingest_bronze_blockchain_onchain_metrics
+5. transform_silver_crypto_models
+6. transform_gold_crypto_models
+7. quality_checks_crypto_data_layers
 
-`ingest_bronze_coingecko_market_data` includes:
+## Security Notes
 
-1. `ingest_coingecko_to_bronze`
-2. `trigger_quality_after_ingestion`
+- Keep secrets in environment variables or a centralized backend.
+- Never commit PAT tokens or local .env files.
+- dbt profiles are environment-driven (credentials are not hardcoded in versioned SQL models).
 
-`transform_silver_crypto_models` includes:
+## What I Would Improve Next (Production Gap)
 
-1. `run_dbt_silver_transformations`
-2. `trigger_quality_after_silver`
+- Add CI pipeline for dbt build/test and DAG validation on pull requests.
+- Add runtime observability dashboard (freshness, SLA, and test pass-rate trends).
+- Expand contract tests and relationship checks across layers.
+- Publish one BI dashboard/storyboard over the gold models for stakeholder consumption.
 
-`transform_gold_crypto_models` includes:
+## Repo Structure
 
-1. `run_dbt_gold_transformations`
-2. `trigger_quality_after_gold`
+- airflow-docker/: Airflow runtime, DAGs, and Docker setup.
+- airflow-docker/dbt/: dbt project (models, tests, macros, profiles).
 
-`quality_checks_crypto_data_layers` runs dbt quality checks and is triggered automatically after both ingestion and transformation DAGs. It can also be triggered independently/manual when needed.
+At runtime, Docker Compose mounts ./dbt into Airflow containers at /opt/airflow/dbt.

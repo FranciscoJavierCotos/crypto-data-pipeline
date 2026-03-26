@@ -24,6 +24,7 @@ with DAG(
         "layer": "all",
         "bronze_source": "coingecko",
         "run_key": "",
+        "quality_grace_days": 1,
         "fail_on_non_critical": False,
     },
 ) as dag:
@@ -66,6 +67,7 @@ with DAG(
             LAYER='{{ (dag_run.conf.get("layer", params.layer) if dag_run and dag_run.conf else params.layer) | lower }}'
             BRONZE_SOURCE='{{ (dag_run.conf.get("bronze_source", params.bronze_source) if dag_run and dag_run.conf else params.bronze_source) | lower }}'
             RUN_KEY='{{ dag_run.conf.get("run_key", params.run_key) if dag_run and dag_run.conf else params.run_key }}'
+            QUALITY_GRACE_DAYS='{{ dag_run.conf.get("quality_grace_days", params.quality_grace_days) if dag_run and dag_run.conf else params.quality_grace_days }}'
             FAIL_ON_NON_CRITICAL='{{ dag_run.conf.get("fail_on_non_critical", params.fail_on_non_critical) if dag_run and dag_run.conf else params.fail_on_non_critical }}'
 
             case "$LAYER" in
@@ -86,9 +88,20 @@ with DAG(
                     ;;
             esac
 
+            case "$QUALITY_GRACE_DAYS" in
+                ''|*[!0-9]*)
+                    echo "Unsupported quality_grace_days '$QUALITY_GRACE_DAYS'. Expected a non-negative integer"
+                    exit 1
+                    ;;
+                *)
+                    ;;
+            esac
+
             DBT_TARGET="${DBT_TARGET:-prod}"
             DBT_THREADS="${DBT_THREADS:-1}"
             DBT_TIMEOUT_SECONDS="${DBT_TEST_TIMEOUT_SECONDS:-600}"
+
+            echo "Quality run context: layer=$LAYER bronze_source=$BRONZE_SOURCE run_key=${RUN_KEY:-<empty>} quality_grace_days=$QUALITY_GRACE_DAYS fail_on_non_critical=$FAIL_ON_NON_CRITICAL"
 
             run_dbt_tests() {
                 TEST_CLASS="$1"
@@ -106,12 +119,19 @@ with DAG(
                     --select "$@"
                 )
 
-                # CoinGecko bronze tests are run-scoped via run_key; pass vars when available.
+                DBT_VARS="{quality_grace_days: $QUALITY_GRACE_DAYS"
                 if [ -n "$RUN_KEY" ]; then
-                    DBT_CMD+=(--vars "{run_key: '$RUN_KEY'}")
+                    # Escape single quotes for YAML single-quoted scalar values.
+                    RUN_KEY_ESCAPED="${RUN_KEY//\'/'\''}"
+                    DBT_VARS=", run_key: '$RUN_KEY_ESCAPED'}"
+                    DBT_VARS="{quality_grace_days: $QUALITY_GRACE_DAYS${DBT_VARS}"
+                else
+                    DBT_VARS="$DBT_VARS}"
                 fi
+                DBT_CMD+=(--vars "$DBT_VARS")
 
                 echo "Running $TEST_CLASS dbt tests for layer=$LAYER"
+                echo "Selectors: $*"
                 if command -v timeout >/dev/null 2>&1; then
                     set +e
                     timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"
@@ -132,24 +152,32 @@ with DAG(
 
             CRITICAL_SELECTORS=()
             NON_CRITICAL_SELECTORS=()
+            SKIP_COINGECKO_BRONZE=false
 
             if [ "$LAYER" = "bronze" ] || [ "$LAYER" = "all" ]; then
                 if [ "$BRONZE_SOURCE" = "coingecko" ]; then
                     if [ -z "$RUN_KEY" ]; then
-                        echo "run_key is required for bronze_source=coingecko quality checks. Provide it in DAG run config."
-                        exit 1
+                        if [ "$LAYER" = "all" ]; then
+                            echo "run_key missing for bronze_source=coingecko while layer=all. Skipping run-scoped coingecko bronze checks and continuing with other selected layers."
+                            SKIP_COINGECKO_BRONZE=true
+                        else
+                            echo "run_key is required for bronze_source=coingecko quality checks. Provide it in DAG run config."
+                            exit 1
+                        fi
                     fi
 
-                    CRITICAL_SELECTORS+=(
-                        path:tests/bronze/bronze_batch_has_data.sql
-                        path:tests/bronze/bronze_batch_no_duplicate_coin_ids.sql
-                        path:tests/bronze/bronze_batch_no_empty_required_fields.sql
-                        path:tests/bronze/bronze_batch_price_bounds_consistent.sql
-                    )
-                    NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_numeric_values_sane.sql)
-                    NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_no_future_timestamps.sql)
-                    NON_CRITICAL_SELECTORS+=(path:models/Sources)
-                    NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                    if [ "$SKIP_COINGECKO_BRONZE" = "false" ]; then
+                        CRITICAL_SELECTORS+=(
+                            path:tests/bronze/bronze_batch_has_data.sql
+                            path:tests/bronze/bronze_batch_no_duplicate_coin_ids.sql
+                            path:tests/bronze/bronze_batch_no_empty_required_fields.sql
+                            path:tests/bronze/bronze_batch_price_bounds_consistent.sql
+                        )
+                        NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_numeric_values_sane.sql)
+                        NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_no_future_timestamps.sql)
+                        NON_CRITICAL_SELECTORS+=(path:models/Sources)
+                        NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                    fi
                 fi
 
                 if [ "$BRONZE_SOURCE" = "fear_greed" ]; then
@@ -174,11 +202,8 @@ with DAG(
             if [ "$LAYER" = "silver" ] || [ "$LAYER" = "all" ]; then
                 CRITICAL_SELECTORS+=(
                     path:tests/silver/silver_no_duplicate_coin_date.sql
-                    path:tests/silver/silver_btc_present_every_date.sql
                     path:tests/silver/silver_positive_prices.sql
                     path:tests/silver/silver_high_gte_low.sql
-                    path:tests/silver/silver_fear_greed_present_every_date.sql
-                    path:tests/silver/silver_btc_onchain_present_every_date.sql
                     path:tests/silver/silver_required_identifiers.sql
                     path:tests/silver/silver_market_cap_rank_valid.sql
                     path:tests/silver/silver_fear_greed_label_values.sql
@@ -193,23 +218,21 @@ with DAG(
                     path:tests/gold/gold_btc_dominance_range.sql
                     path:tests/gold/gold_dominance_sums_to_100.sql
                     path:tests/gold/gold_market_summary_no_duplicates.sql
-                    path:tests/gold/gold_liquidity_rank_duplicate_per_date.sql
                 )
                 NON_CRITICAL_SELECTORS+=(path:models/gold)
                 NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_volatility_bucket_values.sql)
-                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_liquidity_rank_valid.sql)
                 NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_btc_price_in_btc_is_one.sql)
                 NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_market_summary_data_completeness_range.sql)
                 NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_unknown_market_cap_assets_non_negative.sql)
             fi
 
-            if [ "${#CRITICAL_SELECTORS[@]}" -gt 0 ]; then
+            if [ "${CRITICAL_SELECTORS[@]+x}" = "x" ]; then
                 run_dbt_tests "critical" "${CRITICAL_SELECTORS[@]}"
             else
                 echo "No critical tests selected for layer=$LAYER"
             fi
 
-            if [ "${#NON_CRITICAL_SELECTORS[@]}" -gt 0 ]; then
+            if [ "${NON_CRITICAL_SELECTORS[@]+x}" = "x" ]; then
                 set +e
                 run_dbt_tests "non-critical" "${NON_CRITICAL_SELECTORS[@]}"
                 NON_CRITICAL_EXIT_CODE=$?

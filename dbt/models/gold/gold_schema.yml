@@ -79,8 +79,6 @@ models:
         description: 7-day rolling average liquidity ratio
       - name: avg_liquidity_30d
         description: 30-day rolling average liquidity ratio
-      - name: liquidity_rank
-        description: Daily rank (1 = most liquid)
       - name: high_volume_anomaly_flag
         description: True if volume/mcap ratio exceeds 2 standard deviations above 30d mean
       - name: high_cap_low_liquidity_flag

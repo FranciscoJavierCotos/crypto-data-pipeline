@@ -72,7 +72,6 @@ select
     round(volume_to_market_cap_ratio, 6) as volume_to_market_cap_ratio,
     round(avg_liquidity_7d, 6) as avg_liquidity_7d,
     round(avg_liquidity_30d, 6) as avg_liquidity_30d,
-    liquidity_rank,
     case
         when std_liquidity_30d is not null
              and std_liquidity_30d > 0

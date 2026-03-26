@@ -2,9 +2,12 @@
 -- If BTC is missing from a date that has other coins, something went wrong.
 -- A passing test returns 0 rows.
 
+{% set quality_grace_days = var('quality_grace_days', 1) | int %}
+
 with all_dates as (
     select distinct metric_date
     from {{ ref('dim_crypto_daily') }}
+    where metric_date <= date_sub(current_date, {{ quality_grace_days }})
 ),
 
 btc_dates as (

@@ -37,8 +37,7 @@ sources:
             tests:
               - not_null
               - accepted_values:
-                  arguments:
-                    values: ["coingecko_api"]
+                  values: ["coingecko_api"]
           - name: run_key
             description: Stable Airflow run identifier used for idempotent upserts.
             tests:
@@ -63,15 +62,14 @@ sources:
             tests:
               - not_null
               - accepted_values:
-                  arguments:
-                    values:
-                      [
-                        "Extreme Fear",
-                        "Fear",
-                        "Neutral",
-                        "Greed",
-                        "Extreme Greed",
-                      ]
+                  values:
+                    [
+                      "Extreme Fear",
+                      "Fear",
+                      "Neutral",
+                      "Greed",
+                      "Extreme Greed",
+                    ]
           - name: metric_date
             tests:
               - not_null
@@ -83,8 +81,7 @@ sources:
             tests:
               - not_null
               - accepted_values:
-                  arguments:
-                    values: ["alternative_me_api"]
+                  values: ["alternative_me_api"]
           - name: run_key
             description: Stable Airflow run identifier used for idempotent upserts.
             tests:
@@ -125,8 +122,7 @@ sources:
             tests:
               - not_null
               - accepted_values:
-                  arguments:
-                    values: ["blockchain_info_charts_api"]
+                  values: ["blockchain_info_charts_api"]
           - name: run_key
             description: Stable Airflow run identifier used for idempotent upserts.
             tests:
