@@ -118,27 +118,29 @@ docker compose up airflow-init
 docker compose up -d
 ```
 
-Pipeline orchestration is now split into four DAGs:
+Pipeline orchestration uses role-based DAG names:
 
-1. `coingecko_pipeline`
-2. `coingecko_silver_transformations_pipeline`
-3. `coingecko_gold_transformations_pipeline`
-4. `crypto_data_quality_pipeline`
+1. `orchestrate_crypto_bronze_silver_gold`
+2. `ingest_bronze_coingecko_market_data`
+3. `ingest_bronze_fear_greed_index`
+4. `ingest_bronze_blockchain_onchain_metrics`
+5. `transform_silver_crypto_models`
+6. `transform_gold_crypto_models`
+7. `quality_checks_crypto_data_layers`
 
-`coingecko_pipeline` includes only:
+`ingest_bronze_coingecko_market_data` includes:
 
 1. `ingest_coingecko_to_bronze`
 2. `trigger_quality_after_ingestion`
 
-`coingecko_silver_transformations_pipeline` includes:
+`transform_silver_crypto_models` includes:
 
 1. `run_dbt_silver_transformations`
 2. `trigger_quality_after_silver`
-3. `trigger_gold_transformations`
 
-`coingecko_gold_transformations_pipeline` includes:
+`transform_gold_crypto_models` includes:
 
 1. `run_dbt_gold_transformations`
 2. `trigger_quality_after_gold`
 
-`crypto_data_quality_pipeline` runs dbt quality checks and is triggered automatically after both ingestion and transformation DAGs. It can also be triggered independently/manual when needed.
+`quality_checks_crypto_data_layers` runs dbt quality checks and is triggered automatically after both ingestion and transformation DAGs. It can also be triggered independently/manual when needed.

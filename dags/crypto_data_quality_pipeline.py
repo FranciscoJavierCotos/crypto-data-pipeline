@@ -1,7 +1,7 @@
 from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 from datetime import datetime, timedelta
-from pipeline_callbacks import task_failure_alert, sla_miss_alert
+from pipeline_callbacks import task_failure_alert
 
 
 default_args = {
@@ -12,17 +12,17 @@ default_args = {
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
     "on_failure_callback": task_failure_alert,
-    "sla": timedelta(hours=1),
 }
 
 with DAG(
-    dag_id="crypto_data_quality_pipeline",
+    dag_id="quality_checks_crypto_data_layers",
     default_args=default_args,
     schedule=None,
     catchup=False,
-    sla_miss_callback=sla_miss_alert,
+    is_paused_upon_creation=False,
     params={
         "layer": "all",
+        "bronze_source": "coingecko",
         "run_key": "",
         "fail_on_non_critical": False,
     },
@@ -64,6 +64,7 @@ with DAG(
             export DATABRICKS_AUTH_TYPE="${DATABRICKS_AUTH_TYPE:-pat}"
 
             LAYER='{{ (dag_run.conf.get("layer", params.layer) if dag_run and dag_run.conf else params.layer) | lower }}'
+            BRONZE_SOURCE='{{ (dag_run.conf.get("bronze_source", params.bronze_source) if dag_run and dag_run.conf else params.bronze_source) | lower }}'
             RUN_KEY='{{ dag_run.conf.get("run_key", params.run_key) if dag_run and dag_run.conf else params.run_key }}'
             FAIL_ON_NON_CRITICAL='{{ dag_run.conf.get("fail_on_non_critical", params.fail_on_non_critical) if dag_run and dag_run.conf else params.fail_on_non_critical }}'
 
@@ -72,6 +73,15 @@ with DAG(
                     ;;
                 *)
                     echo "Unsupported layer '$LAYER'. Expected one of: bronze, silver, gold, all"
+                    exit 1
+                    ;;
+            esac
+
+            case "$BRONZE_SOURCE" in
+                coingecko|fear_greed|onchain)
+                    ;;
+                *)
+                    echo "Unsupported bronze_source '$BRONZE_SOURCE'. Expected one of: coingecko, fear_greed, onchain"
                     exit 1
                     ;;
             esac
@@ -96,7 +106,7 @@ with DAG(
                     --select "$@"
                 )
 
-                # Bronze run-scoped tests require a run_key; only pass vars when available.
+                # CoinGecko bronze tests are run-scoped via run_key; pass vars when available.
                 if [ -n "$RUN_KEY" ]; then
                     DBT_CMD+=(--vars "{run_key: '$RUN_KEY'}")
                 fi
@@ -124,31 +134,73 @@ with DAG(
             NON_CRITICAL_SELECTORS=()
 
             if [ "$LAYER" = "bronze" ] || [ "$LAYER" = "all" ]; then
-                if [ -z "$RUN_KEY" ]; then
-                    echo "run_key is required for bronze quality checks. Provide it in DAG run config."
-                    exit 1
+                if [ "$BRONZE_SOURCE" = "coingecko" ]; then
+                    if [ -z "$RUN_KEY" ]; then
+                        echo "run_key is required for bronze_source=coingecko quality checks. Provide it in DAG run config."
+                        exit 1
+                    fi
+
+                    CRITICAL_SELECTORS+=(
+                        path:tests/bronze/bronze_batch_has_data.sql
+                        path:tests/bronze/bronze_batch_no_duplicate_coin_ids.sql
+                        path:tests/bronze/bronze_batch_no_empty_required_fields.sql
+                        path:tests/bronze/bronze_batch_price_bounds_consistent.sql
+                    )
+                    NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_numeric_values_sane.sql)
+                    NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_no_future_timestamps.sql)
+                    NON_CRITICAL_SELECTORS+=(path:models/Sources)
+                    NON_CRITICAL_SELECTORS+=(path:models/bronze)
                 fi
 
-                CRITICAL_SELECTORS+=(
-                    path:tests/bronze/bronze_batch_has_data.sql
-                    path:tests/bronze/bronze_batch_no_duplicate_coin_ids.sql
-                    path:tests/bronze/bronze_fear_greed_no_duplicate_metric_date.sql
-                    path:tests/bronze/bronze_fear_greed_value_range.sql
-                    path:tests/bronze/bronze_batch_no_empty_required_fields.sql
-                    path:tests/bronze/bronze_batch_price_bounds_consistent.sql
-                )
-                NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_numeric_values_sane.sql)
-                NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_no_future_timestamps.sql)
-                NON_CRITICAL_SELECTORS+=(path:models/Sources)
-                NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                if [ "$BRONZE_SOURCE" = "fear_greed" ]; then
+                    CRITICAL_SELECTORS+=(
+                        path:tests/bronze/bronze_fear_greed_no_duplicate_metric_date.sql
+                        path:tests/bronze/bronze_fear_greed_value_range.sql
+                    )
+                    NON_CRITICAL_SELECTORS+=(path:models/Sources)
+                    NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                fi
+
+                if [ "$BRONZE_SOURCE" = "onchain" ]; then
+                    CRITICAL_SELECTORS+=(
+                        path:tests/bronze/bronze_onchain_no_duplicate_metric_date.sql
+                        path:tests/bronze/bronze_onchain_metrics_non_negative.sql
+                    )
+                    NON_CRITICAL_SELECTORS+=(path:models/Sources)
+                    NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                fi
             fi
 
             if [ "$LAYER" = "silver" ] || [ "$LAYER" = "all" ]; then
+                CRITICAL_SELECTORS+=(
+                    path:tests/silver/silver_no_duplicate_coin_date.sql
+                    path:tests/silver/silver_btc_present_every_date.sql
+                    path:tests/silver/silver_positive_prices.sql
+                    path:tests/silver/silver_high_gte_low.sql
+                    path:tests/silver/silver_fear_greed_present_every_date.sql
+                    path:tests/silver/silver_btc_onchain_present_every_date.sql
+                    path:tests/silver/silver_required_identifiers.sql
+                    path:tests/silver/silver_market_cap_rank_valid.sql
+                    path:tests/silver/silver_fear_greed_label_values.sql
+                )
                 NON_CRITICAL_SELECTORS+=(path:models/silver)
+                NON_CRITICAL_SELECTORS+=(path:tests/silver/silver_fear_greed_range.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/silver/silver_volume_to_market_cap_ratio_sane.sql)
             fi
 
             if [ "$LAYER" = "gold" ] || [ "$LAYER" = "all" ]; then
+                CRITICAL_SELECTORS+=(
+                    path:tests/gold/gold_btc_dominance_range.sql
+                    path:tests/gold/gold_dominance_sums_to_100.sql
+                    path:tests/gold/gold_market_summary_no_duplicates.sql
+                    path:tests/gold/gold_liquidity_rank_duplicate_per_date.sql
+                )
                 NON_CRITICAL_SELECTORS+=(path:models/gold)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_volatility_bucket_values.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_liquidity_rank_valid.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_btc_price_in_btc_is_one.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_market_summary_data_completeness_range.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_unknown_market_cap_assets_non_negative.sql)
             fi
 
             if [ "${#CRITICAL_SELECTORS[@]}" -gt 0 ]; then

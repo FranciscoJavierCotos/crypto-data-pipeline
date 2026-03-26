@@ -9,7 +9,7 @@ import json
 import time
 from urllib.parse import urlparse
 from databricks import sql
-from pipeline_callbacks import task_failure_alert, sla_miss_alert
+from pipeline_callbacks import task_failure_alert
 
 
 def _quote_identifier(identifier):
@@ -111,7 +111,7 @@ def _get_stable_run_key(default_prefix):
     return f"{dag_id}:manual:{generated_suffix}"
 
 
-def _merge_records_in_batches(cursor, table_name, records, batch_size=200):
+def _insert_records_in_batches(cursor, table_name, records, batch_size=200):
     if not records:
         return
 
@@ -148,31 +148,16 @@ def _merge_records_in_batches(cursor, table_name, records, batch_size=200):
     ]
 
     row_placeholder = "(" + ", ".join(["?"] * len(column_names)) + ")"
-    source_columns_sql = ", ".join(column_names)
-    update_columns = [name for name in column_names if name not in {"id", "run_key"}]
-    update_assignments_sql = ", ".join(
-        [f"target.{column_name} = source.{column_name}" for column_name in update_columns]
-    )
     insert_columns_sql = ", ".join(column_names)
-    insert_values_sql = ", ".join([f"source.{column_name}" for column_name in column_names])
 
     for batch in _chunk_records(records, batch_size):
         values_sql = ", ".join([row_placeholder] * len(batch))
-        merge_sql = f"""
-            MERGE INTO {table_name} AS target
-            USING (
-                SELECT *
-                FROM VALUES {values_sql}
-            ) AS source ({source_columns_sql})
-            ON target.id = source.id AND target.run_key = source.run_key
-            WHEN MATCHED THEN
-              UPDATE SET {update_assignments_sql}
-            WHEN NOT MATCHED THEN
-              INSERT ({insert_columns_sql})
-              VALUES ({insert_values_sql})
+        insert_sql = f"""
+            INSERT INTO {table_name} ({insert_columns_sql})
+            VALUES {values_sql}
         """
         flat_params = [value for row in batch for value in row]
-        cursor.execute(merge_sql, flat_params)
+        cursor.execute(insert_sql, flat_params)
 
 
 def _ensure_columns_exist(cursor, table_name, columns_with_types):
@@ -270,7 +255,7 @@ def fetch_coingecko_data():
     _validate_coingecko_payload(data, required_columns)
 
     ingestion_ts = datetime.now(timezone.utc)
-    run_key = _get_stable_run_key(default_prefix="coingecko_pipeline")
+    run_key = _get_stable_run_key(default_prefix="ingest_bronze_coingecko_market_data")
     source = "coingecko_api"
 
     connection_params = _get_databricks_connection_params()
@@ -401,8 +386,14 @@ def fetch_coingecko_data():
                     )
                 records = list(records_by_id.values())
                 merge_start = time.perf_counter()
-                _merge_records_in_batches(cursor, table_name, records, batch_size=200)
-                print(f"Merged batch in {time.perf_counter() - merge_start:.2f}s")
+                # Retry-safe load: remove any previously written rows for this run_key,
+                # then insert the current run payload in batches.
+                cursor.execute(
+                    f"DELETE FROM {table_name} WHERE run_key = ?",
+                    [run_key],
+                )
+                _insert_records_in_batches(cursor, table_name, records, batch_size=200)
+                print(f"Inserted batch in {time.perf_counter() - merge_start:.2f}s")
 
                 cursor.execute(
                     f"SELECT COUNT(*) FROM {table_name} WHERE run_key = ?",
@@ -438,15 +429,14 @@ default_args = {
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=20),
     "on_failure_callback": task_failure_alert,
-    "sla": timedelta(hours=1),
 }
 
 with DAG(
-    dag_id="coingecko_pipeline",
+    dag_id="ingest_bronze_coingecko_market_data",
     default_args=default_args,
     schedule=None,
     catchup=False,
-    sla_miss_callback=sla_miss_alert,
+    is_paused_upon_creation=False,
 ) as dag:
 
     ingest_bronze_task = PythonOperator(
@@ -457,12 +447,12 @@ with DAG(
 
     trigger_quality_after_ingestion = TriggerDagRunOperator(
         task_id="trigger_quality_after_ingestion",
-        trigger_dag_id="crypto_data_quality_pipeline",
-        wait_for_completion=True,
-        allowed_states=["success"],
-        failed_states=["failed", "upstream_failed"],
+        trigger_dag_id="quality_checks_crypto_data_layers",
+        # Run quality checks asynchronously to avoid blocking worker slots.
+        wait_for_completion=False,
         conf={
             "layer": "bronze",
+            "bronze_source": "coingecko",
             "run_key": "{{ ti.xcom_pull(task_ids='ingest_coingecko_to_bronze') }}",
             "fail_on_non_critical": False,
         },

@@ -2,19 +2,70 @@ version: 2
 
 models:
   - name: dim_crypto_daily
-    description: Silver daily crypto dimension joined with fear and greed sentiment.
+    description: >
+      Silver daily crypto dimension. One row per coin per day, joining CoinGecko market data
+      with Fear & Greed sentiment and Bitcoin on-chain metrics. Deduped by latest ingestion.
     columns:
       - name: id
+        description: CoinGecko coin identifier (e.g. bitcoin, ethereum)
         tests:
           - not_null
+      - name: symbol
+        description: Trading symbol (e.g. btc, eth)
+        tests:
+          - not_null
+      - name: name
+        description: Full coin name
       - name: metric_date
+        description: Calendar date of the snapshot
         tests:
           - not_null
+      - name: current_price
+        description: Price in USD at snapshot time
+        tests:
+          - not_null
+      - name: market_cap
+        description: Total market capitalization in USD
+      - name: total_volume
+        description: 24-hour trading volume in USD
+      - name: high_24h
+        description: 24-hour high price
+      - name: low_24h
+        description: 24-hour low price
+      - name: price_change_24h
+      - name: price_change_percentage_24h
       - name: market_cap_rank
+        description: Rank by market cap (1 = largest)
+      - name: fully_diluted_valuation
       - name: circulating_supply
+      - name: total_supply
+      - name: max_supply
+      - name: ath
+        description: All-time high price
+      - name: ath_change_percentage
+        description: Percentage change from ATH (negative = below ATH)
+      - name: atl
+        description: All-time low price
+      - name: atl_change_percentage
+        description: Percentage change from ATL (positive = above ATL)
       - name: volume_to_market_cap_ratio
+        description: Liquidity ratio (volume / market_cap)
       - name: fear_greed_value
+        description: Fear & Greed Index value (0=extreme fear, 100=extreme greed)
       - name: fear_greed_label
+        description: Classification label for the fear/greed value
+      - name: has_fear_greed_data
+        description: True when a fear/greed record exists for the metric_date
+      - name: btc_tx_count
+        description: Daily Bitcoin transaction count
+      - name: btc_unique_addresses
+        description: Daily unique Bitcoin addresses
+      - name: btc_hash_rate
+        description: Bitcoin network hash rate
+      - name: btc_mempool_size
+        description: Bitcoin mempool size in bytes
+      - name: has_onchain_data
+        description: True when an on-chain record exists for the metric_date
       - name: ingestion_ts
         tests:
           - not_null

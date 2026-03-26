@@ -1,9 +1,106 @@
-{{ config(materialized='table') }}
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key=['id', 'metric_date'],
+    on_schema_change='append_new_columns'
+) }}
 
--- Placeholder scaffold for Gold model. Transformation logic will be added later.
+{% set gold_reprocess_days = var('gold_reprocess_days', 90) %}
+
+-- Rolling volatility analysis per crypto asset.
+-- Computes intraday range, daily returns, and 7d/30d rolling volatility.
+-- Enables comparison of BTC volatility vs altcoins.
+
+with daily_prices as (
+    select
+        id,
+        symbol,
+        name,
+        metric_date,
+        current_price,
+        high_24h,
+        low_24h,
+        lag(current_price) over (
+            partition by id order by metric_date
+        ) as prev_day_price
+        from {{ ref('dim_crypto_daily') }}
+    where current_price is not null
+      and current_price > 0
+            {% if is_incremental() %}
+            and metric_date >= (
+                        select date_sub(coalesce(max(metric_date), current_date), {{ gold_reprocess_days }})
+                        from {{ this }}
+            )
+            {% endif %}
+),
+
+with_returns as (
+    select
+        *,
+        case
+            when low_24h is not null and low_24h > 0
+            then (high_24h - low_24h) / low_24h
+            else null
+        end as intraday_range_pct,
+        case
+            when prev_day_price is not null and prev_day_price > 0
+            then (current_price - prev_day_price) / prev_day_price
+            else null
+        end as daily_return
+    from daily_prices
+),
+
+rolling_vol as (
+    select
+        id,
+        symbol,
+        name,
+        metric_date,
+        current_price,
+        high_24h,
+        low_24h,
+        intraday_range_pct,
+        daily_return,
+        stddev_samp(daily_return) over (
+            partition by id
+            order by metric_date
+            rows between 6 preceding and current row
+        ) as volatility_7d,
+        stddev_samp(daily_return) over (
+            partition by id
+            order by metric_date
+            rows between 29 preceding and current row
+        ) as volatility_30d,
+        count(daily_return) over (
+            partition by id
+            order by metric_date
+            rows between 6 preceding and current row
+        ) as obs_7d,
+        count(daily_return) over (
+            partition by id
+            order by metric_date
+            rows between 29 preceding and current row
+        ) as obs_30d
+    from with_returns
+)
+
 select
-    cast(null as string) as id,
-    cast(null as date) as metric_date,
-    cast(null as double) as volatility_signal,
-    cast(null as string) as volatility_bucket
-where 1 = 0
+    id,
+    symbol,
+    name,
+    metric_date,
+    current_price,
+    high_24h,
+    low_24h,
+    round(intraday_range_pct * 100, 4) as intraday_range_pct,
+    round(daily_return * 100, 4) as daily_return_pct,
+    case when obs_7d >= 5 then round(volatility_7d * 100, 4) else null end as volatility_7d,
+    case when obs_30d >= 20 then round(volatility_30d * 100, 4) else null end as volatility_30d,
+    case
+        when obs_30d < 20 then 'insufficient_data'
+        when volatility_30d * 100 >= 5 then 'extreme'
+        when volatility_30d * 100 >= 3 then 'high'
+        when volatility_30d * 100 >= 1.5 then 'medium'
+        else 'low'
+    end as volatility_bucket
+from rolling_vol

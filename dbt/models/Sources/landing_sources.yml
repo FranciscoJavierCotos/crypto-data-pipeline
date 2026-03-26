@@ -9,13 +9,14 @@ sources:
       - name: coingecko_market_data
         description: Raw CoinGecko payload and selected market fields captured per ingestion run.
         loaded_at_field: ingestion_ts
-        freshness:
-          warn_after:
-            count: 36
-            period: hour
-          error_after:
-            count: 72
-            period: hour
+        config:
+          freshness:
+            warn_after:
+              count: 36
+              period: hour
+            error_after:
+              count: 72
+              period: hour
         columns:
           - name: id
             tests:
@@ -46,13 +47,14 @@ sources:
       - name: fear_greed_raw
         description: Daily fear and greed metric ingested from Alternative.me.
         loaded_at_field: ingestion_ts
-        freshness:
-          warn_after:
-            count: 36
-            period: hour
-          error_after:
-            count: 72
-            period: hour
+        config:
+          freshness:
+            warn_after:
+              count: 36
+              period: hour
+            error_after:
+              count: 72
+              period: hour
         columns:
           - name: value
             tests:
@@ -83,6 +85,48 @@ sources:
               - accepted_values:
                   arguments:
                     values: ["alternative_me_api"]
+          - name: run_key
+            description: Stable Airflow run identifier used for idempotent upserts.
+            tests:
+              - not_null
+
+      - name: onchain_macro_raw
+        description: Daily Bitcoin on-chain market context metrics from Blockchain.com charts API.
+        loaded_at_field: ingestion_ts
+        config:
+          freshness:
+            warn_after:
+              count: 48
+              period: hour
+            error_after:
+              count: 96
+              period: hour
+        columns:
+          - name: metric_date
+            tests:
+              - not_null
+              - unique
+          - name: btc_tx_count
+            tests:
+              - not_null
+          - name: btc_unique_addresses
+            tests:
+              - not_null
+          - name: btc_hash_rate
+            tests:
+              - not_null
+          - name: btc_mempool_size
+            tests:
+              - not_null
+          - name: ingestion_ts
+            tests:
+              - not_null
+          - name: source
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["blockchain_info_charts_api"]
           - name: run_key
             description: Stable Airflow run identifier used for idempotent upserts.
             tests:

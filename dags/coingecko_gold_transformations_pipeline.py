@@ -2,7 +2,7 @@ from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from datetime import datetime, timedelta
-from pipeline_callbacks import task_failure_alert, sla_miss_alert
+from pipeline_callbacks import task_failure_alert
 
 
 default_args = {
@@ -13,15 +13,14 @@ default_args = {
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
     "on_failure_callback": task_failure_alert,
-    "sla": timedelta(hours=1),
 }
 
 with DAG(
-    dag_id="coingecko_gold_transformations_pipeline",
+    dag_id="transform_gold_crypto_models",
     default_args=default_args,
     schedule=None,
     catchup=False,
-    sla_miss_callback=sla_miss_alert,
+    is_paused_upon_creation=False,
 ) as dag:
 
     run_dbt_gold_transformations = BashOperator(
@@ -30,15 +29,27 @@ with DAG(
         append_env=True,
         bash_command="""
             set -euo pipefail
+
+            log() {
+                echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] [gold_dag] $*"
+            }
+
+            STEP_START_TS="$(date +%s)"
+
+            log "Starting dbt gold transformations"
+            log "AIRFLOW_DAG_ID=${AIRFLOW_CTX_DAG_ID:-unknown} AIRFLOW_TASK_ID=${AIRFLOW_CTX_TASK_ID:-unknown} RUN_ID=${AIRFLOW_CTX_DAG_RUN_ID:-unknown}"
             cd /opt/airflow/dbt
+            log "Working directory: $(pwd)"
             export PATH="/home/airflow/.local/bin:${PATH}"
 
             DBT_BIN="${DBT_BIN:-/home/airflow/.local/bin/dbt}"
             if [ ! -x "$DBT_BIN" ]; then
-                echo "dbt executable not found at $DBT_BIN"
-                echo "PATH=$PATH"
+                log "dbt executable not found at $DBT_BIN"
+                log "PATH=$PATH"
                 exit 1
             fi
+
+            log "dbt executable: $DBT_BIN"
 
             if [ -z "${DATABRICKS_TOKEN:-}" ] && [ -n "${AIRFLOW_CONN_DATABRICKS_DEFAULT:-}" ]; then
                 DBR_URI="${AIRFLOW_CONN_DATABRICKS_DEFAULT#\'}"
@@ -53,27 +64,44 @@ with DAG(
             fi
 
             if [ -z "${DATABRICKS_TOKEN:-}" ]; then
-                echo "Missing DATABRICKS_TOKEN. Set it in .env or include token in AIRFLOW_CONN_DATABRICKS_DEFAULT."
+                log "Missing DATABRICKS_TOKEN. Set it in .env or include token in AIRFLOW_CONN_DATABRICKS_DEFAULT."
                 exit 1
             fi
 
             export DATABRICKS_AUTH_TYPE="${DATABRICKS_AUTH_TYPE:-pat}"
             DBT_TIMEOUT_SECONDS="${DBT_RUN_TIMEOUT_SECONDS:-900}"
-            DBT_THREADS="${DBT_THREADS:-1}"
+            DBT_THREADS="${DBT_THREADS:-4}"
+            DBT_LOG_LEVEL="${DBT_LOG_LEVEL:-info}"
+
+            log "Configuration: target=${DBT_TARGET:-prod} threads=${DBT_THREADS} timeout=${DBT_TIMEOUT_SECONDS}s log_level=${DBT_LOG_LEVEL}"
+
+            log "Running dbt debug to validate connection"
+            "$DBT_BIN" debug --target "${DBT_TARGET:-prod}" --log-level "$DBT_LOG_LEVEL"
+
+            log "Discovering selected gold models"
+            "$DBT_BIN" ls --target "${DBT_TARGET:-prod}" --select path:models/gold --resource-type model --output name --log-level "$DBT_LOG_LEVEL"
 
             DBT_CMD=(
                 "$DBT_BIN" run
                 --target "${DBT_TARGET:-prod}"
                 --threads "$DBT_THREADS"
+                --log-level "$DBT_LOG_LEVEL"
                 --select path:models/gold
             )
 
+            log "Executing: ${DBT_CMD[*]}"
+
             if command -v timeout >/dev/null 2>&1; then
                 timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"
-                exit $?
+                EXIT_CODE=$?
+                DURATION=$(( $(date +%s) - STEP_START_TS ))
+                log "dbt run finished with exit code ${EXIT_CODE} after ${DURATION}s"
+                exit $EXIT_CODE
             fi
 
             "${DBT_CMD[@]}"
+            DURATION=$(( $(date +%s) - STEP_START_TS ))
+            log "dbt run finished successfully after ${DURATION}s"
         """,
         env={
             "DBT_PROFILES_DIR": "/opt/airflow/dbt",
@@ -84,10 +112,9 @@ with DAG(
 
     trigger_quality_after_gold = TriggerDagRunOperator(
         task_id="trigger_quality_after_gold",
-        trigger_dag_id="crypto_data_quality_pipeline",
+        trigger_dag_id="quality_checks_crypto_data_layers",
+        # Block until quality checks complete so orchestration cannot proceed past failed quality.
         wait_for_completion=True,
-        allowed_states=["success"],
-        failed_states=["failed", "upstream_failed"],
         conf={
             "layer": "gold",
             "fail_on_non_critical": True,
