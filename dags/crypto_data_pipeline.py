@@ -21,7 +21,7 @@ default_args = {
 with DAG(
     dag_id="orchestrate_crypto_bronze_silver_gold",
     default_args=default_args,
-    schedule="0 0 * * *",
+    schedule="5 0 * * *",
     catchup=False,
     is_paused_upon_creation=False,
     description="Master orchestrator for Bronze ingestion, Silver transforms, and Gold transforms.",

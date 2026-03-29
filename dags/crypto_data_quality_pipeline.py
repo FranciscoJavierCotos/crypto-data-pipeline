@@ -133,21 +133,23 @@ with DAG(
                 echo "Running $TEST_CLASS dbt tests for layer=$LAYER"
                 echo "Selectors: $*"
                 if command -v timeout >/dev/null 2>&1; then
-                    set +e
-                    timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"
-                    DBT_EXIT_CODE=$?
-                    set -e
-                    if [ "$DBT_EXIT_CODE" -eq 124 ]; then
-                        echo "$TEST_CLASS dbt tests timed out after ${DBT_TIMEOUT_SECONDS}s"
+                    if timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"; then
+                        return 0
+                    else
+                        DBT_EXIT_CODE=$?
+                        if [ "$DBT_EXIT_CODE" -eq 124 ]; then
+                            echo "$TEST_CLASS dbt tests timed out after ${DBT_TIMEOUT_SECONDS}s"
+                        fi
+                        return "$DBT_EXIT_CODE"
                     fi
-                    return "$DBT_EXIT_CODE"
                 fi
 
-                set +e
-                "${DBT_CMD[@]}"
-                DBT_EXIT_CODE=$?
-                set -e
-                return "$DBT_EXIT_CODE"
+                if "${DBT_CMD[@]}"; then
+                    return 0
+                else
+                    DBT_EXIT_CODE=$?
+                    return "$DBT_EXIT_CODE"
+                fi
             }
 
             CRITICAL_SELECTORS=()
@@ -233,12 +235,10 @@ with DAG(
             fi
 
             if [ "${NON_CRITICAL_SELECTORS[@]+x}" = "x" ]; then
-                set +e
-                run_dbt_tests "non-critical" "${NON_CRITICAL_SELECTORS[@]}"
-                NON_CRITICAL_EXIT_CODE=$?
-                set -e
-
-                if [ "$NON_CRITICAL_EXIT_CODE" -ne 0 ]; then
+                if run_dbt_tests "non-critical" "${NON_CRITICAL_SELECTORS[@]}"; then
+                    :
+                else
+                    NON_CRITICAL_EXIT_CODE=$?
                     echo "Non-critical quality checks failed (exit $NON_CRITICAL_EXIT_CODE)."
                     if [ "${FAIL_ON_NON_CRITICAL,,}" = "true" ]; then
                         exit "$NON_CRITICAL_EXIT_CODE"
