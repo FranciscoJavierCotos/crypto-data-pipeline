@@ -235,6 +235,26 @@ def _coingecko_headers():
     return {}
 
 
+def _coingecko_requests_per_minute():
+    configured = _safe_int(os.getenv("COINGECKO_RATE_LIMIT_PER_MINUTE"))
+    return max(1, configured or 30)
+
+
+def _build_rate_limit_waiter(requests_per_minute):
+    min_interval_seconds = 60.0 / max(1, requests_per_minute)
+    next_allowed_at = 0.0
+
+    def _wait_for_slot():
+        nonlocal next_allowed_at
+        now = time.monotonic()
+        if now < next_allowed_at:
+            time.sleep(next_allowed_at - now)
+            now = time.monotonic()
+        next_allowed_at = max(next_allowed_at, now) + min_interval_seconds
+
+    return _wait_for_slot, min_interval_seconds
+
+
 def _http_get_json_with_retries(
     url,
     params,
@@ -243,10 +263,13 @@ def _http_get_json_with_retries(
     backoff_seconds=2.0,
     headers=None,
     swallow_http_statuses=None,
+    rate_limit_waiter=None,
 ):
     last_error_text = None
     swallow_http_statuses = set(swallow_http_statuses or [])
     for attempt in range(1, retries + 1):
+        if rate_limit_waiter:
+            rate_limit_waiter()
         response = requests.get(url, params=params, timeout=timeout, headers=headers)
 
         if response.status_code in swallow_http_statuses:
@@ -308,7 +331,9 @@ def ingest_yesterday_coingecko_to_bronze():
     source = "coingecko_api"
     headers = _coingecko_headers()
     has_api_key = bool(headers)
-    default_request_delay_seconds = 1.5 if has_api_key else 6.0
+    requests_per_minute = _coingecko_requests_per_minute()
+    rate_limit_waiter, min_interval_seconds = _build_rate_limit_waiter(requests_per_minute)
+    default_request_delay_seconds = 0.0
     default_history_retries = 6 if has_api_key else 3
     default_top_n_coins = 50 if has_api_key else 20
     default_min_successful_rows = 20 if has_api_key else 10
@@ -339,6 +364,7 @@ def ingest_yesterday_coingecko_to_bronze():
         retries=history_retries,
         backoff_seconds=2.0,
         headers=headers,
+        rate_limit_waiter=rate_limit_waiter,
     )
     if not isinstance(top_coins, list) or not top_coins:
         raise RuntimeError("CoinGecko top coins response was empty")
@@ -368,6 +394,7 @@ def ingest_yesterday_coingecko_to_bronze():
                 backoff_seconds=2.0,
                 headers=headers,
                 swallow_http_statuses={400, 404},
+                rate_limit_waiter=rate_limit_waiter,
             )
         except RuntimeError as exc:
             print(f"Skipping coin {coin_id} after retry exhaustion: {exc}")
@@ -585,7 +612,8 @@ def ingest_yesterday_coingecko_to_bronze():
     )
     print(
         f"CoinGecko backfill settings: top_n_coins={top_n_coins}, "
-        f"request_delay_seconds={request_delay_seconds}, retries={history_retries}, api_key={'yes' if has_api_key else 'no'}"
+        f"request_delay_seconds={request_delay_seconds}, retries={history_retries}, api_key={'yes' if has_api_key else 'no'}, "
+        f"rate_limit_per_minute={requests_per_minute}, min_interval_seconds={min_interval_seconds:.2f}"
     )
     print(f"Total runtime: {time.perf_counter() - total_start:.2f}s")
     print(f"Ingestion run_key: {run_key}")
