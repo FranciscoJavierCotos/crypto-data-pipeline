@@ -2,7 +2,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['id', 'metric_date'],
-    on_schema_change='append_new_columns'
+    on_schema_change='sync_all_columns'
 ) }}
 
 {% set gold_reprocess_days = var('gold_reprocess_days', 90) %}
@@ -70,6 +70,7 @@ select
     market_cap,
     total_volume,
     round(volume_to_market_cap_ratio, 6) as volume_to_market_cap_ratio,
+    liquidity_rank,
     round(avg_liquidity_7d, 6) as avg_liquidity_7d,
     round(avg_liquidity_30d, 6) as avg_liquidity_30d,
     case

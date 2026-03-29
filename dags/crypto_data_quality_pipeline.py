@@ -28,7 +28,6 @@ with DAG(
         "fail_on_non_critical": False,
     },
 ) as dag:
-
     run_dbt_quality_tests = BashOperator(
         task_id="run_dbt_quality_tests",
         execution_timeout=timedelta(minutes=20),
@@ -226,6 +225,11 @@ with DAG(
                 NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_btc_price_in_btc_is_one.sql)
                 NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_market_summary_data_completeness_range.sql)
                 NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_unknown_market_cap_assets_non_negative.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_market_summary_min_coverage.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_sentiment_vs_price_min_coverage.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_volatility_signal_min_coverage.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_liquidity_ranking_min_coverage.sql)
+                NON_CRITICAL_SELECTORS+=(path:tests/gold/gold_btc_dominance_min_coverage.sql)
             fi
 
             if [ "${CRITICAL_SELECTORS[@]+x}" = "x" ]; then

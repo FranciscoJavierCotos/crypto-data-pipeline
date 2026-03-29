@@ -99,6 +99,23 @@ def _parse_iso8601_timestamp(value):
     return None
 
 
+def _coingecko_headers():
+    shared_api_key = (os.getenv("COINGECKO_API_KEY") or "").strip()
+    demo_api_key = (os.getenv("COINGECKO_DEMO_API_KEY") or "").strip()
+    pro_api_key = (os.getenv("COINGECKO_PRO_API_KEY") or "").strip()
+    api_key_header = (os.getenv("COINGECKO_API_KEY_HEADER") or "demo").strip().lower()
+
+    if pro_api_key:
+        return {"x-cg-pro-api-key": pro_api_key}
+    if demo_api_key:
+        return {"x-cg-demo-api-key": demo_api_key}
+    if shared_api_key:
+        if api_key_header == "pro":
+            return {"x-cg-pro-api-key": shared_api_key}
+        return {"x-cg-demo-api-key": shared_api_key}
+    return {}
+
+
 def _get_stable_run_key(default_prefix):
     dag_run_id = (os.getenv("AIRFLOW_CTX_DAG_RUN_ID") or "").strip()
     dag_id = (os.getenv("AIRFLOW_CTX_DAG_ID") or default_prefix).strip() or default_prefix
@@ -231,6 +248,7 @@ def _get_databricks_connection_params():
 def fetch_coingecko_data():
     total_start = time.perf_counter()
     url = "https://api.coingecko.com/api/v3/coins/markets"
+    headers = _coingecko_headers()
 
     params = {
         "vs_currency": "usd",
@@ -241,7 +259,7 @@ def fetch_coingecko_data():
     }
 
     api_start = time.perf_counter()
-    response = requests.get(url, params=params, timeout=30)
+    response = requests.get(url, params=params, timeout=30, headers=headers)
     response.raise_for_status()
     print(f"CoinGecko API call completed in {time.perf_counter() - api_start:.2f}s")
 

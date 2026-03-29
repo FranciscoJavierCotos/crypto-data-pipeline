@@ -2,7 +2,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['id', 'metric_date'],
-    on_schema_change='append_new_columns'
+    on_schema_change='sync_all_columns'
 ) }}
 
 {% set gold_reprocess_days = var('gold_reprocess_days', 90) %}
@@ -94,13 +94,15 @@ select
     low_24h,
     round(intraday_range_pct * 100, 4) as intraday_range_pct,
     round(daily_return * 100, 4) as daily_return_pct,
-    case when obs_7d >= 5 then round(volatility_7d * 100, 4) else null end as volatility_7d,
-    case when obs_30d >= 20 then round(volatility_30d * 100, 4) else null end as volatility_30d,
     case
-        when obs_30d < 20 then 'insufficient_data'
-        when volatility_30d * 100 >= 5 then 'extreme'
-        when volatility_30d * 100 >= 3 then 'high'
-        when volatility_30d * 100 >= 1.5 then 'medium'
-        else 'low'
+        when obs_30d >= 20 and volatility_30d * 100 >= 5 then 'extreme'
+        when obs_30d >= 20 and volatility_30d * 100 >= 3 then 'high'
+        when obs_30d >= 20 and volatility_30d * 100 >= 1.5 then 'medium'
+        when obs_30d >= 20 then 'low'
+        when obs_7d >= 4 and volatility_7d * 100 >= 5 then 'extreme'
+        when obs_7d >= 4 and volatility_7d * 100 >= 3 then 'high'
+        when obs_7d >= 4 and volatility_7d * 100 >= 1.5 then 'medium'
+        when obs_7d >= 4 then 'low'
+        else 'insufficient_data'
     end as volatility_bucket
 from rolling_vol

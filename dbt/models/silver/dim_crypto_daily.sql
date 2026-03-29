@@ -62,12 +62,16 @@ fear_greed_daily as (
         ) as row_num
     from {{ ref('stg_bronze_fear_greed_raw') }}
     where metric_date is not null
-        {% if is_incremental() %}
-        and metric_date >= (
-            select date_sub(coalesce(max(metric_date), current_date), {{ silver_reprocess_days }})
-            from {{ this }}
-        )
-        {% endif %}
+),
+
+fear_greed_latest as (
+    select
+        metric_date,
+        fear_greed_value,
+        fear_greed_label,
+        ingestion_ts
+    from fear_greed_daily
+    where row_num = 1
 ),
 
 onchain_daily as (
@@ -84,12 +88,83 @@ onchain_daily as (
         ) as row_num
     from {{ ref('stg_bronze_onchain_macro_raw') }}
     where metric_date is not null
-        {% if is_incremental() %}
-        and metric_date >= (
-            select date_sub(coalesce(max(metric_date), current_date), {{ silver_reprocess_days }})
-            from {{ this }}
-        )
-        {% endif %}
+),
+
+onchain_latest as (
+    select
+        metric_date,
+        btc_tx_count,
+        btc_unique_addresses,
+        btc_hash_rate,
+        btc_mempool_size,
+        ingestion_ts
+    from onchain_daily
+    where row_num = 1
+),
+
+coins as (
+    select *
+    from coingecko_daily
+    where row_num = 1
+),
+
+date_spine as (
+    select distinct metric_date
+    from coins
+    union
+    select distinct metric_date
+    from fear_greed_latest
+    union
+    select distinct metric_date
+    from onchain_latest
+),
+
+fear_greed_asof as (
+    select
+        d.metric_date,
+        last_value(f.fear_greed_value, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as fear_greed_value,
+        last_value(f.fear_greed_label, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as fear_greed_label,
+        last_value(f.ingestion_ts, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as ingestion_ts
+    from date_spine d
+    left join fear_greed_latest f
+        on d.metric_date = f.metric_date
+),
+
+onchain_asof as (
+    select
+        d.metric_date,
+        last_value(o.btc_tx_count, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as btc_tx_count,
+        last_value(o.btc_unique_addresses, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as btc_unique_addresses,
+        last_value(o.btc_hash_rate, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as btc_hash_rate,
+        last_value(o.btc_mempool_size, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as btc_mempool_size,
+        last_value(o.ingestion_ts, true) over (
+            order by d.metric_date
+            rows between unbounded preceding and current row
+        ) as ingestion_ts
+    from date_spine d
+    left join onchain_latest o
+        on d.metric_date = o.metric_date
 )
 
 select
@@ -116,22 +191,26 @@ select
     c.volume_to_market_cap_ratio,
     f.fear_greed_value,
     f.fear_greed_label,
-    case when f.metric_date is not null then true else false end as has_fear_greed_data,
+    case when f.fear_greed_value is not null then true else false end as has_fear_greed_data,
     o.btc_tx_count,
     o.btc_unique_addresses,
     o.btc_hash_rate,
     o.btc_mempool_size,
-    case when o.metric_date is not null then true else false end as has_onchain_data,
+    case
+        when o.btc_tx_count is not null
+            or o.btc_unique_addresses is not null
+            or o.btc_hash_rate is not null
+            or o.btc_mempool_size is not null
+        then true
+        else false
+    end as has_onchain_data,
     greatest(
         c.ingestion_ts,
         coalesce(f.ingestion_ts, c.ingestion_ts),
         coalesce(o.ingestion_ts, c.ingestion_ts)
     ) as ingestion_ts
-from coingecko_daily c
-left join fear_greed_daily f
+from coins c
+left join fear_greed_asof f
     on c.metric_date = f.metric_date
-   and f.row_num = 1
-left join onchain_daily o
+left join onchain_asof o
     on c.metric_date = o.metric_date
-   and o.row_num = 1
-where c.row_num = 1

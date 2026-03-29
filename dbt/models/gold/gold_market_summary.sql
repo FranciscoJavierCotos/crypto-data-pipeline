@@ -2,10 +2,11 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['id', 'metric_date'],
-    on_schema_change='append_new_columns'
+    on_schema_change='sync_all_columns'
 ) }}
 
 {% set gold_reprocess_days = var('gold_reprocess_days', 90) %}
+{% set gold_min_coverage_pct = var('gold_min_coverage_pct', 70) %}
 {% set dim_daily_relation = ref('dim_crypto_daily') %}
 {% set dim_daily_columns = adapter.get_columns_in_relation(dim_daily_relation) %}
 {% set dim_daily_column_names = dim_daily_columns | map(attribute='name') | map('lower') | list %}
@@ -53,13 +54,7 @@ with base as (
                 {% endif %}
         lag(current_price) over (
             partition by id order by metric_date
-        ) as prev_day_price,
-        lag(current_price, 7) over (
-            partition by id order by metric_date
-        ) as price_7d_ago,
-        lag(current_price, 30) over (
-            partition by id order by metric_date
-        ) as price_30d_ago
+        ) as prev_day_price
         from {{ dim_daily_relation }}
         where true
             {% if is_incremental() %}
@@ -103,20 +98,6 @@ select
         else null
     end as daily_return_pct,
 
-    -- 7-day return
-    case
-        when b.price_7d_ago is not null and b.price_7d_ago > 0
-        then round((b.current_price - b.price_7d_ago) / b.price_7d_ago * 100, 4)
-        else null
-    end as return_7d_pct,
-
-    -- 30-day return
-    case
-        when b.price_30d_ago is not null and b.price_30d_ago > 0
-        then round((b.current_price - b.price_30d_ago) / b.price_30d_ago * 100, 4)
-        else null
-    end as return_30d_pct,
-
     -- Intraday range
     case
         when b.low_24h is not null and b.low_24h > 0
@@ -158,3 +139,9 @@ select
 from base b
 left join btc_price bp
     on b.metric_date = bp.metric_date
+where (
+    (case when b.market_cap is not null then 1 else 0 end)
+    + (case when b.total_volume is not null then 1 else 0 end)
+    + (case when b.has_fear_greed_data then 1 else 0 end)
+    + (case when b.has_onchain_data then 1 else 0 end)
+) / 4.0 * 100 >= {{ gold_min_coverage_pct }}

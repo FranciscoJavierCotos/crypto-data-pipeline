@@ -1,4 +1,4 @@
-from datetime import datetime, date, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 import json
 import os
 import time
@@ -136,10 +136,6 @@ def _extract_usd_timestamp(data, key):
     if isinstance(field, dict):
         return _parse_iso8601_timestamp(field.get("usd"))
     return None
-
-
-def _yesterday_in_madrid():
-    return pendulum.now("Europe/Madrid").subtract(days=1).date()
 
 
 def _target_day_close_utc(target_date):
@@ -299,13 +295,148 @@ def _http_get_json_with_retries(
     raise RuntimeError(f"HTTP request failed after {retries} attempts for {url}: {last_error_text}")
 
 
-def ingest_yesterday_coingecko_to_bronze():
-    total_start = time.perf_counter()
-    target_date = _yesterday_in_madrid()
-    target_date_text = target_date.strftime("%d-%m-%Y")
-    ingestion_ts = datetime.now(timezone.utc)
-    run_key = _build_run_key("backfill_yesterday_coingecko", target_date)
-    source = "coingecko_api"
+def _parse_conf_date(raw_value, parameter_name):
+    if raw_value in (None, ""):
+        return None
+    if isinstance(raw_value, date) and not isinstance(raw_value, datetime):
+        return raw_value
+    if isinstance(raw_value, datetime):
+        return raw_value.date()
+    if isinstance(raw_value, str):
+        try:
+            return date.fromisoformat(raw_value.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid {parameter_name} '{raw_value}'. Use ISO format YYYY-MM-DD."
+            ) from exc
+    raise ValueError(
+        f"Unsupported {parameter_name} type '{type(raw_value).__name__}'. "
+        "Use ISO format YYYY-MM-DD."
+    )
+
+
+def _resolve_window_dates(conf):
+    madrid_now = pendulum.now("Europe/Madrid")
+    default_end = madrid_now.subtract(days=1).date()
+    default_start = madrid_now.subtract(months=6).date()
+
+    start_date = _parse_conf_date(conf.get("backfill_start_date"), "backfill_start_date") or default_start
+    end_date = _parse_conf_date(conf.get("backfill_end_date"), "backfill_end_date") or default_end
+
+    if start_date > end_date:
+        raise ValueError(
+            f"backfill_start_date {start_date.isoformat()} is after backfill_end_date {end_date.isoformat()}"
+        )
+    if end_date >= madrid_now.date():
+        raise ValueError(
+            f"backfill_end_date must be before today in Europe/Madrid. Received {end_date.isoformat()}"
+        )
+
+    return start_date, end_date
+
+
+def _date_range(start_date, end_date):
+    days = (end_date - start_date).days
+    return [start_date + timedelta(days=offset) for offset in range(days + 1)]
+
+
+def _extract_date_from_db(value):
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    raise ValueError(f"Unsupported date value type from Databricks: {type(value).__name__}")
+
+
+def _query_existing_dates(cursor, table_name, date_expression, source, start_date, end_date):
+    query = f"""
+        SELECT {date_expression} AS metric_date
+        FROM {table_name}
+        WHERE source = ?
+          AND {date_expression} BETWEEN ? AND ?
+        GROUP BY {date_expression}
+    """
+    try:
+        cursor.execute(query, [source, start_date, end_date])
+    except Exception as exc:
+        error_text = str(exc).lower()
+        if (
+            "table_or_view_not_found" in error_text
+            or "table or view not found" in error_text
+            or "schema_not_found" in error_text
+            or "schema not found" in error_text
+            or "cannot resolve" in error_text
+        ):
+            return set()
+        raise
+
+    existing = set()
+    for row in cursor.fetchall() or []:
+        metric_date = _extract_date_from_db(row[0])
+        if metric_date is not None:
+            existing.add(metric_date)
+    return existing
+
+
+def _detect_missing_dates(start_date, end_date):
+    all_dates = set(_date_range(start_date, end_date))
+
+    coingecko_catalog = os.getenv("DATABRICKS_CATALOG", "main")
+    common_schema = os.getenv("DATABRICKS_SCHEMA", "bronze")
+    coingecko_table = os.getenv("DATABRICKS_TABLE", "coingecko_market_data")
+
+    fear_greed_catalog = os.getenv("DATABRICKS_CATALOG", "crypto-data-pipeline")
+    fear_greed_table = os.getenv("DATABRICKS_FEAR_GREED_TABLE", "fear_greed_raw")
+
+    onchain_catalog = os.getenv("DATABRICKS_CATALOG", "main")
+    onchain_table = os.getenv("DATABRICKS_ONCHAIN_TABLE", "onchain_macro_raw")
+
+    with _connect_databricks() as connection:
+        with connection.cursor() as cursor:
+            coingecko_existing = _query_existing_dates(
+                cursor,
+                _qualified_table_name(coingecko_catalog, common_schema, coingecko_table),
+                "CAST(last_updated AS DATE)",
+                "coingecko_api",
+                start_date,
+                end_date,
+            )
+            fear_greed_existing = _query_existing_dates(
+                cursor,
+                _qualified_table_name(fear_greed_catalog, common_schema, fear_greed_table),
+                "metric_date",
+                "alternative_me_api",
+                start_date,
+                end_date,
+            )
+            onchain_existing = _query_existing_dates(
+                cursor,
+                _qualified_table_name(onchain_catalog, common_schema, onchain_table),
+                "metric_date",
+                "blockchain_info_charts_api",
+                start_date,
+                end_date,
+            )
+
+    return {
+        "coingecko": sorted(all_dates - coingecko_existing),
+        "fear_greed": sorted(all_dates - fear_greed_existing),
+        "onchain": sorted(all_dates - onchain_existing),
+    }
+
+
+def _ingest_missing_coingecko_dates(missing_dates):
+    if not missing_dates:
+        return {
+            "rows_written": 0,
+            "missing_dates_count": 0,
+            "ingested_dates": [],
+        }
+
     headers = _coingecko_headers()
     has_api_key = bool(headers)
     default_request_delay_seconds = 1.5 if has_api_key else 6.0
@@ -345,109 +476,128 @@ def ingest_yesterday_coingecko_to_bronze():
     top_coins = top_coins[:top_n_coins]
 
     history_url_template = "https://api.coingecko.com/api/v3/coins/{coin_id}/history"
-    history_params = {
-        "date": target_date_text,
-        "localization": "false",
-    }
 
-    records_by_id = {}
-    skipped_coin_ids = []
-    failed_coin_ids = []
-    for coin in top_coins:
-        coin_id = coin.get("id") if isinstance(coin, dict) else None
-        if not coin_id:
-            continue
+    all_records = []
+    ingested_dates = []
+    skipped_dates_no_rows = []
+    partial_dates_below_threshold = []
+    for target_date in missing_dates:
+        target_date_text = target_date.strftime("%d-%m-%Y")
+        ingestion_ts = datetime.now(timezone.utc)
+        records_by_id = {}
+        swallowed_history_responses = 0
 
-        history_url = history_url_template.format(coin_id=coin_id)
-        try:
-            payload = _http_get_json_with_retries(
-                history_url,
-                params=history_params,
-                timeout=30,
-                retries=history_retries,
-                backoff_seconds=2.0,
-                headers=headers,
-                swallow_http_statuses={400, 404},
+        for coin in top_coins:
+            coin_id = coin.get("id") if isinstance(coin, dict) else None
+            if not coin_id:
+                continue
+
+            history_url = history_url_template.format(coin_id=coin_id)
+            try:
+                payload = _http_get_json_with_retries(
+                    history_url,
+                    params={
+                        "date": target_date_text,
+                        "localization": "false",
+                    },
+                    timeout=30,
+                    retries=history_retries,
+                    backoff_seconds=2.0,
+                    headers=headers,
+                    swallow_http_statuses={400, 404},
+                )
+            except RuntimeError as exc:
+                print(f"Skipping coin {coin_id} for {target_date.isoformat()} after retry exhaustion: {exc}")
+                if request_delay_seconds > 0:
+                    time.sleep(request_delay_seconds)
+                continue
+
+            if payload is None:
+                swallowed_history_responses += 1
+                if request_delay_seconds > 0:
+                    time.sleep(request_delay_seconds)
+                continue
+
+            market_data = payload.get("market_data") if isinstance(payload, dict) else None
+            current_price = _safe_float(_extract_usd_value(market_data, "current_price"))
+            if current_price is None:
+                if request_delay_seconds > 0:
+                    time.sleep(request_delay_seconds)
+                continue
+
+            market_cap = _safe_float(_extract_usd_value(market_data, "market_cap"))
+            total_volume = _safe_float(_extract_usd_value(market_data, "total_volume"))
+            volume_to_market_cap_ratio = (
+                (total_volume / market_cap)
+                if market_cap not in (None, 0) and total_volume is not None
+                else None
             )
-        except RuntimeError as exc:
-            print(f"Skipping coin {coin_id} after retry exhaustion: {exc}")
-            failed_coin_ids.append(coin_id)
+
+            market_cap_rank = _safe_int(payload.get("market_cap_rank"))
+            symbol = payload.get("symbol")
+            name = payload.get("name")
+
+            ath_date = _extract_usd_timestamp(market_data, "ath_date")
+            atl_date = _extract_usd_timestamp(market_data, "atl_date")
+
+            run_key = _build_run_key("backfill_last_6_months_coingecko", target_date)
+            records_by_id[coin_id] = (
+                coin_id,
+                symbol,
+                name,
+                current_price,
+                _safe_int(market_cap),
+                _safe_int(total_volume),
+                _safe_float(_extract_usd_value(market_data, "high_24h")),
+                _safe_float(_extract_usd_value(market_data, "low_24h")),
+                _safe_float(_extract_usd_value(market_data, "price_change_24h")),
+                _safe_float(_extract_usd_value(market_data, "price_change_percentage_24h")),
+                market_cap_rank,
+                _safe_float(_extract_usd_value(market_data, "fully_diluted_valuation")),
+                _safe_float(_extract_usd_value(market_data, "market_cap_change_24h")),
+                _safe_float(_extract_usd_value(market_data, "market_cap_change_percentage_24h")),
+                _safe_float(market_data.get("circulating_supply") if isinstance(market_data, dict) else None),
+                _safe_float(market_data.get("total_supply") if isinstance(market_data, dict) else None),
+                _safe_float(market_data.get("max_supply") if isinstance(market_data, dict) else None),
+                _safe_float(_extract_usd_value(market_data, "ath")),
+                _safe_float(_extract_usd_value(market_data, "ath_change_percentage")),
+                ath_date,
+                _safe_float(_extract_usd_value(market_data, "atl")),
+                _safe_float(_extract_usd_value(market_data, "atl_change_percentage")),
+                atl_date,
+                volume_to_market_cap_ratio,
+                _target_day_close_utc(target_date),
+                json.dumps(payload),
+                ingestion_ts,
+                "coingecko_api",
+                run_key,
+            )
+
             if request_delay_seconds > 0:
                 time.sleep(request_delay_seconds)
+
+        date_records = list(records_by_id.values())
+        if not date_records:
+            skipped_dates_no_rows.append(target_date.isoformat())
+            print(
+                f"CoinGecko backfill for {target_date.isoformat()} produced 0 valid rows. "
+                f"Skipping this date. History responses skipped via swallow rules: "
+                f"{swallowed_history_responses}/{len(top_coins)}."
+            )
             continue
 
-        if payload is None:
-            skipped_coin_ids.append(coin_id)
-            if request_delay_seconds > 0:
-                time.sleep(request_delay_seconds)
-            continue
+        if len(date_records) < min_successful_rows:
+            partial_dates_below_threshold.append(
+                f"{target_date.isoformat()}:{len(date_records)}"
+            )
+            print(
+                f"CoinGecko backfill for {target_date.isoformat()} produced {len(date_records)} rows, "
+                f"below configured threshold {min_successful_rows}. "
+                "Continuing and ingesting partial data for this date."
+            )
 
-        market_data = payload.get("market_data") if isinstance(payload, dict) else None
-        current_price = _safe_float(_extract_usd_value(market_data, "current_price"))
-        if current_price is None:
-            skipped_coin_ids.append(coin_id)
-            if request_delay_seconds > 0:
-                time.sleep(request_delay_seconds)
-            continue
-
-        market_cap = _safe_float(_extract_usd_value(market_data, "market_cap"))
-        total_volume = _safe_float(_extract_usd_value(market_data, "total_volume"))
-        volume_to_market_cap_ratio = (
-            (total_volume / market_cap)
-            if market_cap not in (None, 0) and total_volume is not None
-            else None
-        )
-
-        market_cap_rank = _safe_int(payload.get("market_cap_rank"))
-        symbol = payload.get("symbol")
-        name = payload.get("name")
-
-        ath_date = _extract_usd_timestamp(market_data, "ath_date")
-        atl_date = _extract_usd_timestamp(market_data, "atl_date")
-
-        records_by_id[coin_id] = (
-            coin_id,
-            symbol,
-            name,
-            current_price,
-            _safe_int(market_cap),
-            _safe_int(total_volume),
-            _safe_float(_extract_usd_value(market_data, "high_24h")),
-            _safe_float(_extract_usd_value(market_data, "low_24h")),
-            _safe_float(_extract_usd_value(market_data, "price_change_24h")),
-            _safe_float(_extract_usd_value(market_data, "price_change_percentage_24h")),
-            market_cap_rank,
-            _safe_float(_extract_usd_value(market_data, "fully_diluted_valuation")),
-            _safe_float(_extract_usd_value(market_data, "market_cap_change_24h")),
-            _safe_float(_extract_usd_value(market_data, "market_cap_change_percentage_24h")),
-            _safe_float(market_data.get("circulating_supply") if isinstance(market_data, dict) else None),
-            _safe_float(market_data.get("total_supply") if isinstance(market_data, dict) else None),
-            _safe_float(market_data.get("max_supply") if isinstance(market_data, dict) else None),
-            _safe_float(_extract_usd_value(market_data, "ath")),
-            _safe_float(_extract_usd_value(market_data, "ath_change_percentage")),
-            ath_date,
-            _safe_float(_extract_usd_value(market_data, "atl")),
-            _safe_float(_extract_usd_value(market_data, "atl_change_percentage")),
-            atl_date,
-            volume_to_market_cap_ratio,
-            _target_day_close_utc(target_date),
-            json.dumps(payload),
-            ingestion_ts,
-            source,
-            run_key,
-        )
-
-        if request_delay_seconds > 0:
-            time.sleep(request_delay_seconds)
-
-    records = list(records_by_id.values())
-    if not records:
-        raise RuntimeError("CoinGecko yesterday backfill produced zero valid rows")
-    if len(records) < min_successful_rows:
-        raise RuntimeError(
-            f"CoinGecko yesterday backfill produced only {len(records)} rows; "
-            f"minimum required is {min_successful_rows}. Failed coins: {failed_coin_ids[:10]}"
-        )
+        all_records.extend(date_records)
+        ingested_dates.append(target_date)
 
     catalog = os.getenv("DATABRICKS_CATALOG", "main")
     schema = os.getenv("DATABRICKS_SCHEMA", "bronze")
@@ -519,14 +669,16 @@ def ingest_yesterday_coingecko_to_bronze():
                 ],
             )
 
-            cursor.execute(
-                f"""
-                DELETE FROM {table_name}
-                WHERE source = ?
-                  AND CAST(last_updated AS DATE) = ?
-                """,
-                [source, target_date],
-            )
+            if ingested_dates:
+                date_placeholders = ", ".join(["?"] * len(ingested_dates))
+                cursor.execute(
+                    f"""
+                    DELETE FROM {table_name}
+                    WHERE source = ?
+                      AND CAST(last_updated AS DATE) IN ({date_placeholders})
+                    """,
+                    ["coingecko_api", *ingested_dates],
+                )
 
             column_names = [
                 "id",
@@ -559,47 +711,35 @@ def ingest_yesterday_coingecko_to_bronze():
                 "source",
                 "run_key",
             ]
-            _insert_records_in_batches(
-                cursor,
-                table_name,
-                records,
-                column_names,
-                batch_size=100,
-            )
-
-            cursor.execute(
-                f"SELECT COUNT(*) FROM {table_name} WHERE run_key = ?",
-                [run_key],
-            )
-            inserted_count_row = cursor.fetchone()
-            inserted_count = inserted_count_row[0] if inserted_count_row else 0
-            if inserted_count != len(records):
-                raise RuntimeError(
-                    f"CoinGecko backfill row count mismatch for run_key {run_key}: "
-                    f"expected {len(records)}, found {inserted_count}"
+            if all_records:
+                _insert_records_in_batches(
+                    cursor,
+                    table_name,
+                    all_records,
+                    column_names,
+                    batch_size=100,
                 )
+            else:
+                print("No valid CoinGecko records found for requested missing dates. Skipping bronze insert.")
 
-    print(
-        f"CoinGecko yesterday backfill completed for {target_date.isoformat()} with "
-        f"{len(records)} rows; skipped {len(skipped_coin_ids)} coins; failed {len(failed_coin_ids)} coins"
-    )
-    print(
-        f"CoinGecko backfill settings: top_n_coins={top_n_coins}, "
-        f"request_delay_seconds={request_delay_seconds}, retries={history_retries}, api_key={'yes' if has_api_key else 'no'}"
-    )
-    print(f"Total runtime: {time.perf_counter() - total_start:.2f}s")
-    print(f"Ingestion run_key: {run_key}")
-    return run_key
+    return {
+        "rows_written": len(all_records),
+        "missing_dates_count": len(missing_dates),
+        "ingested_dates": [d.isoformat() for d in ingested_dates],
+        "skipped_dates_no_rows": skipped_dates_no_rows,
+        "partial_dates_below_threshold": partial_dates_below_threshold,
+    }
 
 
-def ingest_yesterday_fear_greed_to_bronze():
-    total_start = time.perf_counter()
-    target_date = _yesterday_in_madrid()
-    ingestion_ts = datetime.now(timezone.utc)
-    run_key = _build_run_key("backfill_yesterday_fear_greed", target_date)
-    source = "alternative_me_api"
+def _ingest_missing_fear_greed_dates(missing_dates):
+    if not missing_dates:
+        return {
+            "rows_written": 0,
+            "missing_dates_count": 0,
+            "ingested_dates": [],
+        }
 
-    response = requests.get("https://api.alternative.me/fng/?limit=30&format=json", timeout=30)
+    response = requests.get("https://api.alternative.me/fng/?limit=0&format=json", timeout=30)
     if response.status_code != 200:
         raise RuntimeError(
             f"Alternative.me request failed with status {response.status_code}: {response.text[:500]}"
@@ -610,7 +750,7 @@ def ingest_yesterday_fear_greed_to_bronze():
     if not isinstance(data_points, list) or not data_points:
         raise RuntimeError("Alternative.me payload is missing a non-empty data array")
 
-    target_point = None
+    points_by_date = {}
     for point in data_points:
         if not isinstance(point, dict):
             continue
@@ -618,19 +758,44 @@ def ingest_yesterday_fear_greed_to_bronze():
         if metric_timestamp is None:
             continue
         metric_day = datetime.fromtimestamp(metric_timestamp, tz=timezone.utc).date()
-        if metric_day == target_date:
-            target_point = point
-            break
+        points_by_date[metric_day] = point
 
-    if target_point is None:
-        raise RuntimeError(
-            f"Alternative.me did not return a record for yesterday ({target_date.isoformat()})"
+    ingestion_ts = datetime.now(timezone.utc)
+    records = []
+    missing_from_api = []
+    ingested_dates = []
+    for target_date in missing_dates:
+        point = points_by_date.get(target_date)
+        if not point:
+            missing_from_api.append(target_date.isoformat())
+            continue
+
+        value = _safe_int(point.get("value"))
+        value_classification = point.get("value_classification")
+        if value is None or not value_classification:
+            missing_from_api.append(target_date.isoformat())
+            continue
+
+        run_key = _build_run_key("backfill_last_6_months_fear_greed", target_date)
+        records.append(
+            (
+                value,
+                value_classification,
+                target_date,
+                _safe_int(point.get("time_until_update")),
+                json.dumps(point),
+                ingestion_ts,
+                "alternative_me_api",
+                run_key,
+            )
         )
+        ingested_dates.append(target_date)
 
-    value = _safe_int(target_point.get("value"))
-    value_classification = target_point.get("value_classification")
-    if value is None or not value_classification:
-        raise RuntimeError("Alternative.me yesterday record is missing required fields")
+    if missing_from_api:
+        raise RuntimeError(
+            "Alternative.me did not provide complete coverage for missing dates: "
+            + ", ".join(missing_from_api[:20])
+        )
 
     catalog = os.getenv("DATABRICKS_CATALOG", "crypto-data-pipeline")
     schema = os.getenv("DATABRICKS_SCHEMA", "bronze")
@@ -671,70 +836,38 @@ def ingest_yesterday_fear_greed_to_bronze():
                 ],
             )
 
+            date_placeholders = ", ".join(["?"] * len(ingested_dates))
             cursor.execute(
                 f"""
-                MERGE INTO {table_name} AS target
-                USING (
-                    SELECT
-                        ? AS value,
-                        ? AS value_classification,
-                        ? AS metric_date,
-                        ? AS time_until_update,
-                        ? AS raw_json,
-                        ? AS ingestion_ts,
-                        ? AS source,
-                        ? AS run_key
-                ) AS source
-                ON target.metric_date = source.metric_date AND target.source = source.source
-                WHEN MATCHED AND source.ingestion_ts >= target.ingestion_ts THEN
-                  UPDATE SET
-                    target.value = source.value,
-                    target.value_classification = source.value_classification,
-                    target.time_until_update = source.time_until_update,
-                    target.raw_json = source.raw_json,
-                    target.ingestion_ts = source.ingestion_ts,
-                    target.source = source.source,
-                    target.run_key = source.run_key
-                WHEN NOT MATCHED THEN
-                  INSERT (
-                    value,
-                    value_classification,
-                    metric_date,
-                    time_until_update,
-                    raw_json,
-                    ingestion_ts,
-                    source,
-                    run_key
-                  )
-                  VALUES (
-                    source.value,
-                    source.value_classification,
-                    source.metric_date,
-                    source.time_until_update,
-                    source.raw_json,
-                    source.ingestion_ts,
-                    source.source,
-                    source.run_key
-                  )
+                DELETE FROM {table_name}
+                WHERE source = ?
+                  AND metric_date IN ({date_placeholders})
                 """,
-                [
-                    value,
-                    value_classification,
-                    target_date,
-                    _safe_int(target_point.get("time_until_update")),
-                    json.dumps(target_point),
-                    ingestion_ts,
-                    source,
-                    run_key,
-                ],
+                ["alternative_me_api", *ingested_dates],
             )
 
-    print(
-        f"Fear & Greed yesterday backfill completed for {target_date.isoformat()} with value {value}"
-    )
-    print(f"Total runtime: {time.perf_counter() - total_start:.2f}s")
-    print(f"Ingestion run_key: {run_key}")
-    return run_key
+            _insert_records_in_batches(
+                cursor,
+                table_name,
+                records,
+                [
+                    "value",
+                    "value_classification",
+                    "metric_date",
+                    "time_until_update",
+                    "raw_json",
+                    "ingestion_ts",
+                    "source",
+                    "run_key",
+                ],
+                batch_size=100,
+            )
+
+    return {
+        "rows_written": len(records),
+        "missing_dates_count": len(missing_dates),
+        "ingested_dates": [d.isoformat() for d in ingested_dates],
+    }
 
 
 def _fetch_chart_points(chart_name, timespan_days):
@@ -772,35 +905,62 @@ def _fetch_chart_points(chart_name, timespan_days):
     return points
 
 
-def ingest_yesterday_onchain_to_bronze():
-    total_start = time.perf_counter()
-    target_date = _yesterday_in_madrid()
-    ingestion_ts = datetime.now(timezone.utc)
-    run_key = _build_run_key("backfill_yesterday_onchain", target_date)
-    source = "blockchain_info_charts_api"
-    timespan_days = _safe_int(os.getenv("BLOCKCHAIN_CHART_TIMESPAN_DAYS")) or 120
+def _ingest_missing_onchain_dates(missing_dates):
+    if not missing_dates:
+        return {
+            "rows_written": 0,
+            "missing_dates_count": 0,
+            "ingested_dates": [],
+        }
 
-    row_values = {}
+    min_missing_date = min(missing_dates)
+    required_days = (datetime.now(timezone.utc).date() - min_missing_date).days + 7
+    configured_days = _safe_int(os.getenv("BLOCKCHAIN_CHART_TIMESPAN_DAYS")) or 120
+    timespan_days = max(required_days, configured_days)
+
+    points_by_metric = {}
     for metric_name, chart_name in CHARTS.items():
-        points = _fetch_chart_points(chart_name, timespan_days)
-        if target_date not in points:
-            raise RuntimeError(
-                f"Blockchain.com chart {chart_name} does not contain yesterday "
-                f"({target_date.isoformat()}) in the returned time window"
-            )
-        row_values[metric_name] = points[target_date]
+        points_by_metric[metric_name] = _fetch_chart_points(chart_name, timespan_days)
 
-    record = (
-        target_date,
-        row_values.get("btc_tx_count"),
-        row_values.get("btc_unique_addresses"),
-        row_values.get("btc_hash_rate"),
-        row_values.get("btc_mempool_size"),
-        json.dumps({"metric_date": target_date.isoformat(), "values": row_values}),
-        ingestion_ts,
-        source,
-        run_key,
-    )
+    ingestion_ts = datetime.now(timezone.utc)
+    records = []
+    missing_from_api = []
+    ingested_dates = []
+    for target_date in missing_dates:
+        row_values = {}
+        missing_metrics = []
+        for metric_name in CHARTS:
+            points = points_by_metric.get(metric_name, {})
+            if target_date not in points:
+                missing_metrics.append(metric_name)
+                continue
+            row_values[metric_name] = points[target_date]
+
+        if missing_metrics:
+            missing_from_api.append(f"{target_date.isoformat()} ({', '.join(missing_metrics)})")
+            continue
+
+        run_key = _build_run_key("backfill_last_6_months_onchain", target_date)
+        records.append(
+            (
+                target_date,
+                row_values.get("btc_tx_count"),
+                row_values.get("btc_unique_addresses"),
+                row_values.get("btc_hash_rate"),
+                row_values.get("btc_mempool_size"),
+                json.dumps({"metric_date": target_date.isoformat(), "values": row_values}),
+                ingestion_ts,
+                "blockchain_info_charts_api",
+                run_key,
+            )
+        )
+        ingested_dates.append(target_date)
+
+    if missing_from_api:
+        raise RuntimeError(
+            "Blockchain.com did not provide complete coverage for missing dates: "
+            + ", ".join(missing_from_api[:20])
+        )
 
     catalog = os.getenv("DATABRICKS_CATALOG", "main")
     schema = os.getenv("DATABRICKS_SCHEMA", "bronze")
@@ -843,18 +1003,20 @@ def ingest_yesterday_onchain_to_bronze():
                 ],
             )
 
+            date_placeholders = ", ".join(["?"] * len(ingested_dates))
             cursor.execute(
                 f"""
                 DELETE FROM {table_name}
-                WHERE source = ? AND metric_date = ?
+                WHERE source = ?
+                  AND metric_date IN ({date_placeholders})
                 """,
-                [source, target_date],
+                ["blockchain_info_charts_api", *ingested_dates],
             )
 
             _insert_records_in_batches(
                 cursor,
                 table_name,
-                [record],
+                records,
                 [
                     "metric_date",
                     "btc_tx_count",
@@ -866,13 +1028,50 @@ def ingest_yesterday_onchain_to_bronze():
                     "source",
                     "run_key",
                 ],
-                batch_size=1,
+                batch_size=200,
             )
 
-    print(f"On-chain yesterday backfill completed for {target_date.isoformat()}")
-    print(f"Total runtime: {time.perf_counter() - total_start:.2f}s")
-    print(f"Ingestion run_key: {run_key}")
-    return run_key
+    return {
+        "rows_written": len(records),
+        "missing_dates_count": len(missing_dates),
+        "ingested_dates": [d.isoformat() for d in ingested_dates],
+    }
+
+
+def backfill_missing_last_6_months(**context):
+    task_start = time.perf_counter()
+    dag_run = context.get("dag_run")
+    conf = dag_run.conf if dag_run and dag_run.conf else {}
+
+    backfill_start_date, backfill_end_date = _resolve_window_dates(conf)
+    missing_by_source = _detect_missing_dates(backfill_start_date, backfill_end_date)
+
+    coingecko_result = _ingest_missing_coingecko_dates(missing_by_source["coingecko"])
+    fear_greed_result = _ingest_missing_fear_greed_dates(missing_by_source["fear_greed"])
+    onchain_result = _ingest_missing_onchain_dates(missing_by_source["onchain"])
+
+    total_rows_written = (
+        coingecko_result["rows_written"]
+        + fear_greed_result["rows_written"]
+        + onchain_result["rows_written"]
+    )
+
+    lookback_days = (backfill_end_date - backfill_start_date).days + 1
+    summary = {
+        "window_start": backfill_start_date.isoformat(),
+        "window_end": backfill_end_date.isoformat(),
+        "coingecko": coingecko_result,
+        "fear_greed": fear_greed_result,
+        "onchain": onchain_result,
+        "total_rows_written": total_rows_written,
+        "silver_reprocess_days": lookback_days,
+        "gold_reprocess_days": lookback_days,
+        "runtime_seconds": round(time.perf_counter() - task_start, 2),
+    }
+
+    print("Last 6 months missing-date backfill summary:")
+    print(json.dumps(summary, indent=2))
+    return summary
 
 
 def drop_deprecated_gold_columns():
@@ -923,68 +1122,22 @@ default_args = {
 
 
 with DAG(
-    dag_id="backfill_yesterday_crypto_bronze_silver_gold",
+    dag_id="backfill_last_6_months_missing_crypto_bronze_silver_gold",
     default_args=default_args,
     schedule=None,
     catchup=False,
     is_paused_upon_creation=False,
-    description="Manual full pipeline backfill that ingests yesterday-only source data and runs silver/gold.",
+    description=(
+        "Manual one-time backfill that checks last 6 months coverage in bronze, ingests missing "
+        "dates per source, then runs silver and gold transformations on the recovered window."
+    ),
 ) as dag:
-
     start = EmptyOperator(task_id="start")
 
-    ingest_coingecko_yesterday = PythonOperator(
-        task_id="ingest_coingecko_yesterday",
-        python_callable=ingest_yesterday_coingecko_to_bronze,
-        execution_timeout=timedelta(minutes=90),
-    )
-
-    trigger_quality_after_coingecko = TriggerDagRunOperator(
-        task_id="trigger_quality_after_coingecko",
-        trigger_dag_id="quality_checks_crypto_data_layers",
-        wait_for_completion=False,
-        conf={
-            "layer": "bronze",
-            "bronze_source": "coingecko",
-            "run_key": "{{ ti.xcom_pull(task_ids='ingest_coingecko_yesterday') }}",
-            "fail_on_non_critical": False,
-        },
-    )
-
-    ingest_fear_greed_yesterday = PythonOperator(
-        task_id="ingest_fear_greed_yesterday",
-        python_callable=ingest_yesterday_fear_greed_to_bronze,
-        execution_timeout=timedelta(minutes=15),
-    )
-
-    trigger_quality_after_fear_greed = TriggerDagRunOperator(
-        task_id="trigger_quality_after_fear_greed",
-        trigger_dag_id="quality_checks_crypto_data_layers",
-        wait_for_completion=False,
-        conf={
-            "layer": "bronze",
-            "bronze_source": "fear_greed",
-            "run_key": "{{ ti.xcom_pull(task_ids='ingest_fear_greed_yesterday') }}",
-            "fail_on_non_critical": False,
-        },
-    )
-
-    ingest_onchain_yesterday = PythonOperator(
-        task_id="ingest_onchain_yesterday",
-        python_callable=ingest_yesterday_onchain_to_bronze,
-        execution_timeout=timedelta(minutes=20),
-    )
-
-    trigger_quality_after_onchain = TriggerDagRunOperator(
-        task_id="trigger_quality_after_onchain",
-        trigger_dag_id="quality_checks_crypto_data_layers",
-        wait_for_completion=False,
-        conf={
-            "layer": "bronze",
-            "bronze_source": "onchain",
-            "run_key": "{{ ti.xcom_pull(task_ids='ingest_onchain_yesterday') }}",
-            "fail_on_non_critical": False,
-        },
+    ingest_missing_bronze_6_months = PythonOperator(
+        task_id="ingest_missing_bronze_6_months",
+        python_callable=backfill_missing_last_6_months,
+        execution_timeout=timedelta(hours=8),
     )
 
     trigger_silver_transformations = TriggerDagRunOperator(
@@ -994,7 +1147,10 @@ with DAG(
         allowed_states=["success"],
         failed_states=["failed"],
         poke_interval=30,
-        execution_timeout=timedelta(minutes=60),
+        execution_timeout=timedelta(minutes=120),
+        conf={
+            "silver_reprocess_days": "{{ ti.xcom_pull(task_ids='ingest_missing_bronze_6_months').get('silver_reprocess_days', 180) }}",
+        },
     )
 
     trigger_gold_transformations = TriggerDagRunOperator(
@@ -1004,7 +1160,10 @@ with DAG(
         allowed_states=["success"],
         failed_states=["failed"],
         poke_interval=30,
-        execution_timeout=timedelta(minutes=60),
+        execution_timeout=timedelta(minutes=120),
+        conf={
+            "gold_reprocess_days": "{{ ti.xcom_pull(task_ids='ingest_missing_bronze_6_months').get('gold_reprocess_days', 180) }}",
+        },
     )
 
     cleanup_deprecated_gold_columns = PythonOperator(
@@ -1015,21 +1174,6 @@ with DAG(
 
     end = EmptyOperator(task_id="end")
 
-    start >> [
-        ingest_coingecko_yesterday,
-        ingest_fear_greed_yesterday,
-        ingest_onchain_yesterday,
-    ]
-
-    ingest_coingecko_yesterday >> trigger_quality_after_coingecko
-    ingest_fear_greed_yesterday >> trigger_quality_after_fear_greed
-    ingest_onchain_yesterday >> trigger_quality_after_onchain
-
-    [
-        ingest_coingecko_yesterday,
-        ingest_fear_greed_yesterday,
-        ingest_onchain_yesterday,
-    ] >> trigger_silver_transformations
-
+    start >> ingest_missing_bronze_6_months >> trigger_silver_transformations
     trigger_silver_transformations >> trigger_gold_transformations
     trigger_gold_transformations >> cleanup_deprecated_gold_columns >> end

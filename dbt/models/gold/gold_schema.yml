@@ -46,12 +46,8 @@ models:
         description: Intraday price range as percentage of low price
       - name: daily_return_pct
         description: Day-over-day return percentage
-      - name: volatility_7d
-        description: 7-day rolling standard deviation of daily returns (%)
-      - name: volatility_30d
-        description: 30-day rolling standard deviation of daily returns (%)
       - name: volatility_bucket
-        description: "Classification: low, medium, high, extreme, or insufficient_data"
+        description: "Classification from rolling volatility (30d when available, else 7d fallback): low, medium, high, extreme, or insufficient_data"
         tests:
           - accepted_values:
               values: ["low", "medium", "high", "extreme", "insufficient_data"]
@@ -75,6 +71,7 @@ models:
       - name: market_cap
       - name: total_volume
       - name: volume_to_market_cap_ratio
+      - name: liquidity_rank
       - name: avg_liquidity_7d
         description: 7-day rolling average liquidity ratio
       - name: avg_liquidity_30d
@@ -155,10 +152,6 @@ models:
       - name: volume_to_market_cap_ratio
       - name: daily_return_pct
         description: Day-over-day price change (%)
-      - name: return_7d_pct
-        description: 7-day price change (%)
-      - name: return_30d_pct
-        description: 30-day price change (%)
       - name: intraday_range_pct
         description: Intraday high-low range as % of low
       - name: distance_from_ath_pct

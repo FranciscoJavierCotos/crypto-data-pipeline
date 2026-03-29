@@ -79,6 +79,18 @@ with DAG(
             "$DBT_BIN" debug --target "${DBT_TARGET:-prod}" --log-level "$DBT_LOG_LEVEL"
 
             DBT_SELECTOR="${DBT_SELECTOR:-+path:models/silver}"
+            SILVER_REPROCESS_DAYS='{{ dag_run.conf.get("silver_reprocess_days", "") if dag_run and dag_run.conf else "" }}'
+
+            case "$SILVER_REPROCESS_DAYS" in
+                ''|*[!0-9]*)
+                    if [ -n "$SILVER_REPROCESS_DAYS" ]; then
+                        log "Invalid silver_reprocess_days '$SILVER_REPROCESS_DAYS'. Expected a non-negative integer."
+                        exit 1
+                    fi
+                    ;;
+                *)
+                    ;;
+            esac
 
             log "Discovering selected models with selector: ${DBT_SELECTOR}"
             "$DBT_BIN" ls --target "${DBT_TARGET:-prod}" --select "$DBT_SELECTOR" --resource-type model --output name --log-level "$DBT_LOG_LEVEL"
@@ -90,6 +102,12 @@ with DAG(
                 --log-level "$DBT_LOG_LEVEL"
                 --select "$DBT_SELECTOR"
             )
+
+            if [ -n "$SILVER_REPROCESS_DAYS" ]; then
+                DBT_VARS="{silver_reprocess_days: $SILVER_REPROCESS_DAYS}"
+                DBT_CMD+=(--vars "$DBT_VARS")
+                log "Applying dbt vars: $DBT_VARS"
+            fi
 
             log "Executing: ${DBT_CMD[*]}"
 

@@ -78,6 +78,19 @@ with DAG(
             log "Running dbt debug to validate connection"
             "$DBT_BIN" debug --target "${DBT_TARGET:-prod}" --log-level "$DBT_LOG_LEVEL"
 
+            GOLD_REPROCESS_DAYS='{{ dag_run.conf.get("gold_reprocess_days", "") if dag_run and dag_run.conf else "" }}'
+
+            case "$GOLD_REPROCESS_DAYS" in
+                ''|*[!0-9]*)
+                    if [ -n "$GOLD_REPROCESS_DAYS" ]; then
+                        log "Invalid gold_reprocess_days '$GOLD_REPROCESS_DAYS'. Expected a non-negative integer."
+                        exit 1
+                    fi
+                    ;;
+                *)
+                    ;;
+            esac
+
             log "Discovering selected gold models"
             "$DBT_BIN" ls --target "${DBT_TARGET:-prod}" --select path:models/gold --resource-type model --output name --log-level "$DBT_LOG_LEVEL"
 
@@ -88,6 +101,12 @@ with DAG(
                 --log-level "$DBT_LOG_LEVEL"
                 --select path:models/gold
             )
+
+            if [ -n "$GOLD_REPROCESS_DAYS" ]; then
+                DBT_VARS="{gold_reprocess_days: $GOLD_REPROCESS_DAYS}"
+                DBT_CMD+=(--vars "$DBT_VARS")
+                log "Applying dbt vars: $DBT_VARS"
+            fi
 
             log "Executing: ${DBT_CMD[*]}"
 
