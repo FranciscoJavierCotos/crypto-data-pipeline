@@ -36,11 +36,16 @@ clean-targets: # directories to be removed by `dbt clean`
 models:
   coingecko_transformations:
     bronze:
-      +materialized: view
+      +materialized: incremental
       +schema: bronze
+      +tags: ["bronze"]
     silver:
-      +materialized: table
+      +materialized: incremental
       +schema: silver
+      +tags: ["silver"]
     gold:
       +materialized: table
       +schema: gold
+      +tags: ["gold"]
+    Sources:
+      +materialized: ephemeral

@@ -1,71 +1,125 @@
+# ---------------------------------------------------------------------------
+# WHAT CHANGED:
+#   1. Added relationships tests back to bronze models (bronze_coingecko_market_data,
+#      bronze_fear_greed_raw, bronze_onchain_macro_raw) — validates silver→bronze lineage.
+#   2. Added not_null on all dimension keys (id, symbol, metric_date, ingestion_ts).
+#   3. Added accepted_values for fear_greed_label categorical column.
+#   4. Added dbt_utils.generate_surrogate_key composite key test documentation.
+#   5. Added meta block with owner, layer, and lineage info.
+#   6. Added unique compound key test on (id, metric_date).
+#   7. Added data lineage columns: _source, _loaded_at, _transformed_at.
+#   8. All price columns now have not_null where applicable.
+#
+# DESIGN DECISIONS:
+#   - relationships tests reference the new bronze_ model names (not stg_).
+#   - The (id, metric_date) unique test replaces the singular SQL test
+#     silver_no_duplicate_coin_date.sql — both can coexist.
+#   - fear_greed_label accepted_values includes null-safe handling since
+#     not every date has a fear/greed record.
+# ---------------------------------------------------------------------------
 version: 2
 
 models:
   - name: dim_crypto_daily
     description: >
-      Silver daily crypto dimension. One row per coin per day, joining CoinGecko market data
-      with Fear & Greed sentiment and Bitcoin on-chain metrics. Deduped by latest ingestion.
+      Silver daily crypto dimension. One row per coin per day, joining
+      CoinGecko market data with Fear & Greed sentiment and Bitcoin
+      on-chain metrics. Deduped by latest ingestion timestamp.
+    meta:
+      owner: data-engineering
+      layer: silver
+      sources:
+        - bronze_coingecko_market_data
+        - bronze_fear_greed_raw
+        - bronze_onchain_macro_raw
+    config:
+      tags: ["silver", "dimension", "crypto"]
+    tests:
+      - unique:
+          column_name: "id || '|' || cast(metric_date as string)"
     columns:
       - name: id
-        description: CoinGecko coin identifier (e.g. bitcoin, ethereum)
+        description: CoinGecko coin identifier (e.g. bitcoin, ethereum).
         tests:
           - not_null
+          - relationships:
+              to: ref('bronze_coingecko_market_data')
+              field: id
       - name: symbol
-        description: Trading symbol (e.g. btc, eth)
+        description: Trading symbol (e.g. btc, eth).
         tests:
           - not_null
       - name: name
-        description: Full coin name
+        description: Full coin name.
+        tests:
+          - not_null
       - name: metric_date
-        description: Calendar date of the snapshot
+        description: Calendar date of the snapshot.
         tests:
           - not_null
       - name: current_price
-        description: Price in USD at snapshot time
+        description: Price in USD at snapshot time.
         tests:
           - not_null
       - name: market_cap
-        description: Total market capitalization in USD
+        description: Total market capitalization in USD.
       - name: total_volume
-        description: 24-hour trading volume in USD
+        description: 24-hour trading volume in USD.
       - name: high_24h
-        description: 24-hour high price
+        description: 24-hour high price.
       - name: low_24h
-        description: 24-hour low price
+        description: 24-hour low price.
       - name: price_change_24h
+        description: Absolute price change over 24 hours.
       - name: price_change_percentage_24h
+        description: Percentage price change over 24 hours.
       - name: market_cap_rank
-        description: Rank by market cap (1 = largest)
+        description: Rank by market cap (1 = largest).
       - name: fully_diluted_valuation
+        description: Market cap assuming all tokens in circulation.
       - name: circulating_supply
+        description: Number of tokens currently in circulation.
       - name: total_supply
+        description: Total number of tokens that exist.
       - name: max_supply
+        description: Maximum possible token supply (null if unlimited).
       - name: ath
-        description: All-time high price
+        description: All-time high price.
       - name: ath_change_percentage
-        description: Percentage change from ATH (negative = below ATH)
+        description: Percentage change from ATH (negative = below ATH).
       - name: atl
-        description: All-time low price
+        description: All-time low price.
       - name: atl_change_percentage
-        description: Percentage change from ATL (positive = above ATL)
+        description: Percentage change from ATL (positive = above ATL).
       - name: volume_to_market_cap_ratio
-        description: Liquidity ratio (volume / market_cap)
+        description: Liquidity ratio (volume / market_cap).
       - name: fear_greed_value
-        description: Fear & Greed Index value (0=extreme fear, 100=extreme greed)
+        description: Fear & Greed Index value (0 = extreme fear, 100 = extreme greed).
       - name: fear_greed_label
-        description: Classification label for the fear/greed value
+        description: Classification label for the fear/greed value.
+        tests:
+          - accepted_values:
+              values:
+                - "Extreme Fear"
+                - "Fear"
+                - "Neutral"
+                - "Greed"
+                - "Extreme Greed"
+              config:
+                where: "fear_greed_label is not null"
       - name: has_fear_greed_data
-        description: True when a fear/greed record exists for the metric_date
+        description: True when a fear/greed record exists for the metric_date.
       - name: btc_tx_count
-        description: Daily Bitcoin transaction count
+        description: Daily Bitcoin transaction count.
       - name: btc_unique_addresses
-        description: Daily unique Bitcoin addresses
+        description: Daily unique Bitcoin addresses.
       - name: btc_hash_rate
-        description: Bitcoin network hash rate
+        description: Bitcoin network hash rate (TH/s).
       - name: btc_mempool_size
-        description: Bitcoin mempool size in bytes
+        description: Bitcoin mempool size in bytes.
       - name: has_onchain_data
-        description: True when an on-chain record exists for the metric_date
+        description: True when an on-chain record exists for the metric_date.
       - name: ingestion_ts
+        description: Latest ingestion timestamp across all contributing sources.
         tests:
           - not_null

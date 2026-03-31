@@ -5,34 +5,65 @@ models:
     description: >
       Sentiment and on-chain regime versus next-day price change.
       Answers: "Does extreme fear predict BTC price recovery?"
+    meta:
+      owner: data-engineering
+      layer: gold
+      refresh: full_table
+      consumers: ["bi_dashboard", "analytics"]
+    config:
+      tags: ["gold", "analytics", "sentiment"]
+    tests:
+      - unique:
+          column_name: "id || '|' || cast(metric_date as string)"
     columns:
       - name: id
+        description: CoinGecko coin identifier.
         tests:
           - not_null
       - name: metric_date
+        description: Calendar date of the snapshot.
         tests:
           - not_null
       - name: fear_greed_value
+        description: Fear & Greed Index value (0–100).
       - name: fear_greed_label
+        description: Classification of the fear/greed value.
       - name: btc_tx_count
       - name: btc_unique_addresses
       - name: btc_hash_rate
       - name: btc_mempool_size
       - name: current_price
+        description: Price in USD at snapshot time.
+        tests:
+          - not_null
       - name: total_volume
       - name: volume_to_market_cap_ratio
       - name: next_day_price_change_pct
+        description: Percentage price change next day (look-ahead).
       - name: onchain_activity_regime
+        description: Regime classification derived from on-chain metrics.
 
   - name: gold_volatility_signal
     description: >
       Rolling volatility analysis per crypto asset with 7d/30d metrics.
       Answers: "Is BTC more or less volatile than altcoins?" and "Which coins have extreme volatility?"
+    meta:
+      owner: data-engineering
+      layer: gold
+      refresh: full_table
+      consumers: ["bi_dashboard", "risk_analytics"]
+    config:
+      tags: ["gold", "analytics", "volatility"]
+    tests:
+      - unique:
+          column_name: "id || '|' || cast(metric_date as string)"
     columns:
       - name: id
+        description: CoinGecko coin identifier.
         tests:
           - not_null
       - name: symbol
+        description: Trading symbol.
         tests:
           - not_null
       - name: name
@@ -40,14 +71,18 @@ models:
         tests:
           - not_null
       - name: current_price
+        tests:
+          - not_null
       - name: high_24h
       - name: low_24h
       - name: intraday_range_pct
-        description: Intraday price range as percentage of low price
+        description: Intraday price range as percentage of low price.
       - name: daily_return_pct
-        description: Day-over-day return percentage
+        description: Day-over-day return percentage.
       - name: volatility_bucket
-        description: "Classification from rolling volatility (30d when available, else 7d fallback): low, medium, high, extreme, or insufficient_data"
+        description: >
+          Classification from rolling volatility (30d when available,
+          else 7d fallback): low, medium, high, extreme, or insufficient_data.
         tests:
           - accepted_values:
               values: ["low", "medium", "high", "extreme", "insufficient_data"]
@@ -56,6 +91,16 @@ models:
     description: >
       Daily liquidity ranking across all crypto assets by volume/market_cap ratio.
       Answers: "Which coins are most liquid?" and "Is BTC more liquid than ETH?"
+    meta:
+      owner: data-engineering
+      layer: gold
+      refresh: full_table
+      consumers: ["bi_dashboard", "trading_analytics"]
+    config:
+      tags: ["gold", "analytics", "liquidity"]
+    tests:
+      - unique:
+          column_name: "id || '|' || cast(metric_date as string)"
     columns:
       - name: id
         tests:
@@ -72,21 +117,30 @@ models:
       - name: total_volume
       - name: volume_to_market_cap_ratio
       - name: liquidity_rank
+        description: Daily rank by volume/market_cap ratio (1 = most liquid).
       - name: avg_liquidity_7d
-        description: 7-day rolling average liquidity ratio
+        description: 7-day rolling average liquidity ratio.
       - name: avg_liquidity_30d
-        description: 30-day rolling average liquidity ratio
+        description: 30-day rolling average liquidity ratio.
       - name: high_volume_anomaly_flag
-        description: True if volume/mcap ratio exceeds 2 standard deviations above 30d mean
+        description: True if volume/mcap ratio exceeds 2 standard deviations above 30d mean.
       - name: high_cap_low_liquidity_flag
-        description: True if top-5 by market cap but outside top-5 by liquidity
+        description: True if top-5 by market cap but outside top-5 by liquidity.
 
   - name: gold_btc_dominance
     description: >
       Bitcoin dominance and relative performance vs the broader crypto market.
       Answers: "How does BTC dominance change during extreme fear?" and "Does ETH outperform BTC?"
+    meta:
+      owner: data-engineering
+      layer: gold
+      refresh: full_table
+      consumers: ["bi_dashboard", "market_research"]
+    config:
+      tags: ["gold", "analytics", "btc_dominance"]
     columns:
       - name: metric_date
+        description: Calendar date (one row per day).
         tests:
           - not_null
           - unique
@@ -100,20 +154,20 @@ models:
         tests:
           - not_null
       - name: btc_dominance_pct
-        description: BTC share of total market cap (%)
+        description: BTC share of total market cap (%).
       - name: eth_dominance_pct
-        description: ETH share of total market cap (%)
+        description: ETH share of total market cap (%).
       - name: altcoin_dominance_pct
-        description: Non-BTC share of total market cap (%)
+        description: Non-BTC share of total market cap (%).
       - name: btc_volume
       - name: eth_volume
       - name: total_market_volume
       - name: btc_volume_share_pct
-        description: BTC share of total trading volume (%)
+        description: BTC share of total trading volume (%).
       - name: btc_daily_return_pct
       - name: eth_daily_return_pct
       - name: btc_eth_ratio
-        description: BTC price divided by ETH price
+        description: BTC price divided by ETH price.
       - name: fear_greed_value
       - name: fear_greed_label
       - name: btc_tx_count
@@ -121,16 +175,26 @@ models:
       - name: btc_hash_rate
       - name: btc_mempool_size
       - name: num_coins
-        description: Number of coins tracked on that day
+        description: Number of coins tracked on that day.
       - name: unknown_market_cap_asset_count
-        description: Number of assets with null market cap on the date
+        description: Number of assets with null market cap on the date.
       - name: known_market_cap_asset_count
-        description: Number of assets with non-null market cap on the date
+        description: Number of assets with non-null market cap on the date.
 
   - name: gold_market_summary
     description: >
       Wide daily market snapshot per coin. The main "go-to" table for ad-hoc querying.
       Includes returns, volatility, sentiment, on-chain, and BTC-denominated price.
+    meta:
+      owner: data-engineering
+      layer: gold
+      refresh: full_table
+      consumers: ["bi_dashboard", "analytics", "adhoc"]
+    config:
+      tags: ["gold", "analytics", "market_summary"]
+    tests:
+      - unique:
+          column_name: "id || '|' || cast(metric_date as string)"
     columns:
       - name: id
         tests:
@@ -151,15 +215,15 @@ models:
       - name: circulating_supply
       - name: volume_to_market_cap_ratio
       - name: daily_return_pct
-        description: Day-over-day price change (%)
+        description: Day-over-day price change (%).
       - name: intraday_range_pct
-        description: Intraday high-low range as % of low
+        description: Intraday high-low range as % of low.
       - name: distance_from_ath_pct
-        description: How far below all-time high (negative %)
+        description: How far below all-time high (negative %).
       - name: distance_from_atl_pct
-        description: How far above all-time low (%)
+        description: How far above all-time low (%).
       - name: price_in_btc
-        description: Price denominated in BTC
+        description: Price denominated in BTC.
       - name: fear_greed_value
       - name: fear_greed_label
       - name: has_fear_greed_data
@@ -169,4 +233,4 @@ models:
       - name: btc_mempool_size
       - name: has_onchain_data
       - name: data_completeness_score_pct
-        description: Completeness score (0-100) for sentiment/on-chain/core market fields
+        description: Completeness score (0-100) for sentiment/on-chain/core market fields.

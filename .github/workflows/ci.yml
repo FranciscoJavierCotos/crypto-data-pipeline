@@ -1,0 +1,140 @@
+name: CI — Airflow DAGs + dbt
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "airflow-docker/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "airflow-docker/**"
+
+env:
+  PYTHON_VERSION: "3.10"
+  DBT_PROFILES_DIR: airflow-docker/dbt
+  DBT_TARGET: prod
+
+defaults:
+  run:
+    working-directory: airflow-docker
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Python syntax + DAG import check
+  # ------------------------------------------------------------------
+  dag-lint:
+    name: DAG Lint & Import Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-airflow.txt
+          pip install pytest
+
+      - name: Compile all Python files
+        run: python -m compileall dags/ utils/ plugins/ -q
+
+      - name: Run DAG integrity tests
+        run: pytest tests/dags/test_dag_integrity.py -v --tb=short
+
+  # ------------------------------------------------------------------
+  # 2. dbt compile + parse (no warehouse needed)
+  # ------------------------------------------------------------------
+  dbt-compile:
+    name: dbt Compile & Parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt
+        run: |
+          pip install --upgrade pip
+          pip install dbt-core dbt-databricks
+
+      - name: dbt deps
+        working-directory: airflow-docker/dbt
+        run: dbt deps
+
+      - name: dbt parse (validate project structure)
+        working-directory: airflow-docker/dbt
+        run: dbt parse --target ${{ env.DBT_TARGET }}
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_CATALOG: ${{ secrets.DATABRICKS_CATALOG }}
+
+      - name: dbt compile
+        working-directory: airflow-docker/dbt
+        run: dbt compile --target ${{ env.DBT_TARGET }}
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_CATALOG: ${{ secrets.DATABRICKS_CATALOG }}
+
+  # ------------------------------------------------------------------
+  # 3. dbt test (requires warehouse — only on main)
+  # ------------------------------------------------------------------
+  dbt-test:
+    name: dbt Test (warehouse)
+    needs: dbt-compile
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt
+        run: |
+          pip install --upgrade pip
+          pip install dbt-core dbt-databricks
+
+      - name: dbt deps
+        working-directory: airflow-docker/dbt
+        run: dbt deps
+
+      - name: dbt test — bronze
+        working-directory: airflow-docker/dbt
+        run: dbt test --target ${{ env.DBT_TARGET }} --select "path:tests/bronze"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_CATALOG: ${{ secrets.DATABRICKS_CATALOG }}
+
+      - name: dbt test — silver
+        working-directory: airflow-docker/dbt
+        run: dbt test --target ${{ env.DBT_TARGET }} --select "path:tests/silver"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_CATALOG: ${{ secrets.DATABRICKS_CATALOG }}
+
+      - name: dbt test — gold
+        working-directory: airflow-docker/dbt
+        run: dbt test --target ${{ env.DBT_TARGET }} --select "path:tests/gold"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_CATALOG: ${{ secrets.DATABRICKS_CATALOG }}

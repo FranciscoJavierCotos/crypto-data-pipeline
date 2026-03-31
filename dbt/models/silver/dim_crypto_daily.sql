@@ -39,7 +39,7 @@ with coingecko_daily as (
             partition by id, cast(last_updated as date)
             order by ingestion_ts desc, last_updated desc
         ) as row_num
-    from {{ ref('stg_bronze_coingecko_market_data') }}
+    from {{ ref('bronze_coingecko_market_data') }}
     where id is not null
       and last_updated is not null
         {% if is_incremental() %}
@@ -60,7 +60,7 @@ fear_greed_daily as (
             partition by metric_date
             order by ingestion_ts desc
         ) as row_num
-    from {{ ref('stg_bronze_fear_greed_raw') }}
+    from {{ ref('bronze_fear_greed_raw') }}
     where metric_date is not null
 ),
 
@@ -86,7 +86,7 @@ onchain_daily as (
             partition by metric_date
             order by ingestion_ts desc
         ) as row_num
-    from {{ ref('stg_bronze_onchain_macro_raw') }}
+    from {{ ref('bronze_onchain_macro_raw') }}
     where metric_date is not null
 ),
 

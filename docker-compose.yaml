@@ -80,6 +80,7 @@ x-airflow-common: &airflow-common
     DBT_PROFILES_DIR: /opt/airflow/dbt
     DBT_TARGET: ${DBT_TARGET:-prod}
     DBT_TARGET_SCHEMA: ${DBT_TARGET_SCHEMA:-silver}
+    PYTHONPATH: "/opt/airflow:/opt/airflow/dags:/opt/airflow/plugins"
     # yamllint disable rule:line-length
     # Use simple http server on scheduler for health checks
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
@@ -97,6 +98,7 @@ x-airflow-common: &airflow-common
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
     - ${AIRFLOW_PROJ_DIR:-.}/dbt:/opt/airflow/dbt
+    - ${AIRFLOW_PROJ_DIR:-.}/utils:/opt/airflow/utils
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     redis:

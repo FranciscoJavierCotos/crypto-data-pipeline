@@ -1,8 +1,11 @@
 {{ config(
-    materialized='incremental',
-    incremental_strategy='merge',
-    unique_key=['id', 'metric_date'],
-    on_schema_change='sync_all_columns'
+    materialized='table',
+    schema='gold',
+    meta={
+        'owner': 'data-engineering',
+        'layer': 'gold'
+    },
+    tags=['gold', 'analytics', 'volatility']
 ) }}
 
 {% set gold_reprocess_days = var('gold_reprocess_days', 90) %}

@@ -1,0 +1,225 @@
+# ---------------------------------------------------------------------------
+# WHAT CHANGED (vs Sources/sources_schema.yml → landing_sources.yml):
+#   1. Moved from models/Sources/ to models/sources/ (lowercase convention).
+#   2. Tightened freshness thresholds per user requirements:
+#      - CoinGecko: warn 1h / error 6h (was 36h/72h)
+#      - Fear & Greed: warn 1h / error 6h (was 36h/72h)
+#      - On-chain: warn 1h / error 6h (was 48h/96h)
+#   3. Added description for every source table and column.
+#   4. Added loaded_at_field pointing to ingestion_ts for all tables.
+#   5. Expanded column-level tests (not_null, accepted_values, unique).
+#
+# WHY:
+#   - Enterprise freshness SLAs require tighter thresholds.
+#   - loaded_at_field enables `dbt source freshness` monitoring.
+#   - Descriptions enable data catalog / documentation generation.
+#
+# DESIGN DECISIONS:
+#   - Freshness thresholds assume daily runs at 00:05 UTC.  If ingestion
+#     cadence changes, adjust warn/error accordingly.
+#   - The schema env_var defaults to 'bronze' for all sources.
+# ---------------------------------------------------------------------------
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Bronze landing zone — raw data ingested by Airflow from external APIs.
+      Tables are written by ingestion DAGs; consumed by dbt bronze staging models.
+    database: "{{ env_var('DATABRICKS_CATALOG', 'main') }}"
+    schema: "{{ env_var('DATABRICKS_SCHEMA', 'bronze') }}"
+
+    tables:
+      # ----------------------------------------------------------------
+      # CoinGecko market data
+      # ----------------------------------------------------------------
+      - name: coingecko_market_data
+        description: >
+          Raw CoinGecko /coins/markets payload. One row per coin per
+          ingestion run, including price, volume, market cap, and metadata.
+        loaded_at_field: ingestion_ts
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 6
+            period: hour
+        columns:
+          - name: id
+            description: CoinGecko coin identifier (e.g. bitcoin, ethereum).
+            tests:
+              - not_null
+          - name: symbol
+            description: Trading ticker symbol (e.g. btc, eth).
+            tests:
+              - not_null
+          - name: name
+            description: Human-readable coin name.
+            tests:
+              - not_null
+          - name: current_price
+            description: Latest price in the requested vs_currency (USD).
+            tests:
+              - not_null
+          - name: market_cap
+            description: Total market capitalisation in USD.
+          - name: total_volume
+            description: 24-hour trading volume in USD.
+          - name: high_24h
+            description: Highest price in the last 24 hours.
+          - name: low_24h
+            description: Lowest price in the last 24 hours.
+          - name: price_change_24h
+            description: Absolute price change over 24 hours.
+          - name: price_change_percentage_24h
+            description: Percentage price change over 24 hours.
+          - name: market_cap_rank
+            description: Rank by market cap (1 = largest).
+          - name: fully_diluted_valuation
+            description: Market cap assuming all tokens in circulation.
+          - name: market_cap_change_24h
+            description: Absolute change in market cap over 24h.
+          - name: market_cap_change_percentage_24h
+            description: Percentage change in market cap over 24h.
+          - name: circulating_supply
+            description: Number of tokens currently in circulation.
+          - name: total_supply
+            description: Total number of tokens that exist.
+          - name: max_supply
+            description: Maximum possible token supply (null if unlimited).
+          - name: ath
+            description: All-time high price.
+          - name: ath_change_percentage
+            description: Percentage change from all-time high.
+          - name: ath_date
+            description: Timestamp of the all-time high.
+          - name: atl
+            description: All-time low price.
+          - name: atl_change_percentage
+            description: Percentage change from all-time low.
+          - name: atl_date
+            description: Timestamp of the all-time low.
+          - name: volume_to_market_cap_ratio
+            description: Liquidity ratio (total_volume / market_cap).
+          - name: last_updated
+            description: CoinGecko's last-updated timestamp for this coin snapshot.
+          - name: ingestion_ts
+            description: UTC timestamp when the Airflow task wrote this row.
+            tests:
+              - not_null
+          - name: source
+            description: Identifier of the source system.
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ["coingecko_api"]
+          - name: run_key
+            description: Deterministic Airflow run identifier for idempotent upserts.
+            tests:
+              - not_null
+
+      # ----------------------------------------------------------------
+      # Fear & Greed Index
+      # ----------------------------------------------------------------
+      - name: fear_greed_raw
+        description: >
+          Daily Fear & Greed Index value from Alternative.me.
+          One row per calendar day (metric_date).
+        loaded_at_field: ingestion_ts
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 6
+            period: hour
+        columns:
+          - name: value
+            description: Fear & Greed Index integer (0 = Extreme Fear, 100 = Extreme Greed).
+            tests:
+              - not_null
+          - name: value_classification
+            description: Human-readable label for the index value.
+            tests:
+              - not_null
+              - accepted_values:
+                  values:
+                    - "Extreme Fear"
+                    - "Fear"
+                    - "Neutral"
+                    - "Greed"
+                    - "Extreme Greed"
+          - name: metric_date
+            description: Calendar date of the index reading (UTC).
+            tests:
+              - not_null
+              - unique
+          - name: time_until_update
+            description: Seconds until the next index update (from API response).
+          - name: ingestion_ts
+            description: UTC timestamp when the Airflow task wrote this row.
+            tests:
+              - not_null
+          - name: source
+            description: Identifier of the source system.
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ["alternative_me_api"]
+          - name: run_key
+            description: Deterministic Airflow run identifier for idempotent upserts.
+            tests:
+              - not_null
+
+      # ----------------------------------------------------------------
+      # On-chain macro metrics
+      # ----------------------------------------------------------------
+      - name: onchain_macro_raw
+        description: >
+          Daily Bitcoin on-chain metrics from Blockchain.com charts API.
+          Includes transaction count, unique addresses, hash rate, and mempool size.
+        loaded_at_field: ingestion_ts
+        freshness:
+          warn_after:
+            count: 1
+            period: hour
+          error_after:
+            count: 6
+            period: hour
+        columns:
+          - name: metric_date
+            description: Calendar date for the metric readings (UTC).
+            tests:
+              - not_null
+              - unique
+          - name: btc_tx_count
+            description: Bitcoin daily transaction count.
+            tests:
+              - not_null
+          - name: btc_unique_addresses
+            description: Bitcoin daily unique active addresses.
+            tests:
+              - not_null
+          - name: btc_hash_rate
+            description: Bitcoin network hash rate (TH/s).
+            tests:
+              - not_null
+          - name: btc_mempool_size
+            description: Bitcoin mempool size in bytes.
+            tests:
+              - not_null
+          - name: ingestion_ts
+            description: UTC timestamp when the Airflow task wrote this row.
+            tests:
+              - not_null
+          - name: source
+            description: Identifier of the source system.
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ["blockchain_info_charts_api"]
+          - name: run_key
+            description: Deterministic Airflow run identifier for idempotent upserts.
+            tests:
+              - not_null

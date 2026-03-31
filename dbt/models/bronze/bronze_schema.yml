@@ -1,41 +1,121 @@
 version: 2
 
 models:
-  - name: stg_bronze_coingecko_market_data
-    description: Bronze contract view over coingecko_market_data source.
+  - name: bronze_coingecko_market_data
+    description: >
+      Bronze incremental model over coingecko_market_data source.
+      Provides a dbt-managed contract layer with schema enforcement,
+      incremental merge tracking, and a _loaded_at lineage column.
+    meta:
+      owner: data-engineering
+      layer: bronze
+      source: coingecko_api
+    config:
+      tags: ["bronze", "raw", "coingecko"]
+    tests:
+      - unique:
+          column_name: "id || '|' || run_key"
     columns:
       - name: id
+        description: CoinGecko coin identifier (e.g. bitcoin, ethereum).
         tests:
           - not_null
+      - name: symbol
+        description: Trading symbol (e.g. btc, eth).
+        tests:
+          - not_null
+      - name: name
+        description: Full coin name.
+        tests:
+          - not_null
+      - name: current_price
+        description: Spot price in USD.
+      - name: market_cap
+        description: Total market capitalisation in USD.
       - name: run_key
+        description: Deterministic ingestion batch key (YYYYMMDD_HHMMSS or date string).
         tests:
           - not_null
       - name: ingestion_ts
+        description: Timestamp the record was ingested by Airflow.
+        tests:
+          - not_null
+      - name: _loaded_at
+        description: dbt load timestamp (mirrors ingestion_ts).
         tests:
           - not_null
 
-  - name: stg_bronze_fear_greed_raw
-    description: Bronze contract view over fear_greed_raw source.
+  - name: bronze_fear_greed_raw
+    description: >
+      Bronze incremental model over fear_greed_raw source.
+      One record per calendar day with the Fear & Greed Index value.
+    meta:
+      owner: data-engineering
+      layer: bronze
+      source: alternative_me_api
+    config:
+      tags: ["bronze", "raw", "fear_greed"]
     columns:
       - name: metric_date
+        description: Calendar date of the fear/greed reading.
         tests:
           - not_null
+          - unique
+      - name: value
+        description: Fear & Greed Index value (0–100).
+        tests:
+          - not_null
+      - name: value_classification
+        description: Human-readable classification of the value.
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - "Extreme Fear"
+                - "Fear"
+                - "Neutral"
+                - "Greed"
+                - "Extreme Greed"
       - name: run_key
         tests:
           - not_null
       - name: ingestion_ts
+        tests:
+          - not_null
+      - name: _loaded_at
         tests:
           - not_null
 
-  - name: stg_bronze_onchain_macro_raw
-    description: Bronze contract view over onchain_macro_raw source.
+  - name: bronze_onchain_macro_raw
+    description: >
+      Bronze incremental model over onchain_macro_raw source.
+      Daily Bitcoin on-chain metrics (tx count, unique addresses, hash rate, mempool).
+    meta:
+      owner: data-engineering
+      layer: bronze
+      source: blockchain_info_charts_api
+    config:
+      tags: ["bronze", "raw", "onchain"]
     columns:
       - name: metric_date
+        description: Calendar date of the on-chain snapshot.
         tests:
           - not_null
+          - unique
+      - name: btc_tx_count
+        description: Daily Bitcoin transaction count.
+      - name: btc_unique_addresses
+        description: Daily unique Bitcoin addresses.
+      - name: btc_hash_rate
+        description: Network hash rate (TH/s).
+      - name: btc_mempool_size
+        description: Mempool size in bytes.
       - name: run_key
         tests:
           - not_null
       - name: ingestion_ts
+        tests:
+          - not_null
+      - name: _loaded_at
         tests:
           - not_null

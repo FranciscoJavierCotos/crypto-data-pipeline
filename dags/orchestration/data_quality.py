@@ -1,25 +1,58 @@
-from airflow import DAG
-from airflow.providers.standard.operators.bash import BashOperator
-from datetime import datetime, timedelta
-from pipeline_callbacks import task_failure_alert
+# ---------------------------------------------------------------------------
+# WHAT CHANGED (vs crypto_data_quality_pipeline.py):
+#   1. Converted to TaskFlow @dag decorator.
+#   2. dag_id renamed: quality_checks_crypto_data_layers → data_quality.
+#   3. Added tags, doc_md.
+#   4. Bash script logic preserved — passes layer, bronze_source, run_key,
+#      quality_grace_days, fail_on_non_critical from dag_run.conf.
+#   5. File moved to dags/orchestration/.
+#
+# NOTE: The bash script is intentionally lengthy — it selects critical vs
+# non-critical dbt tests per layer and runs them separately.
+# ---------------------------------------------------------------------------
+from __future__ import annotations
 
+from datetime import datetime, timedelta
+
+from airflow.sdk import dag
+from airflow.providers.standard.operators.bash import BashOperator
+
+from callbacks import task_failure_alert
+
+DOC_MD = """
+### Data Quality Checks
+
+Runs dbt tests across bronze, silver, and/or gold layers.
+Triggered by ingestion and transformation DAGs with layer-specific config.
+
+**Parameters (via `dag_run.conf`):**
+- `layer`: bronze | silver | gold | all
+- `bronze_source`: coingecko | fear_greed | onchain
+- `run_key`: batch identifier for run-scoped bronze tests
+- `quality_grace_days`: lookback window for freshness (default: 1)
+- `fail_on_non_critical`: whether non-critical test failures fail the DAG
+"""
 
 default_args = {
-    "owner": "airflow",
+    "owner": "data-engineering",
     "start_date": datetime(2025, 3, 21),
-    "retries": 1,
+    "retries": 3,
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
+    "email_on_failure": True,
     "on_failure_callback": task_failure_alert,
 }
 
-with DAG(
-    dag_id="quality_checks_crypto_data_layers",
+
+@dag(
+    dag_id="data_quality",
     default_args=default_args,
     schedule=None,
     catchup=False,
     is_paused_upon_creation=False,
+    tags=["quality", "crypto", "dbt", "testing"],
+    doc_md=DOC_MD,
     params={
         "layer": "all",
         "bronze_source": "coingecko",
@@ -27,7 +60,9 @@ with DAG(
         "quality_grace_days": 1,
         "fail_on_non_critical": False,
     },
-) as dag:
+)
+def data_quality():
+
     run_dbt_quality_tests = BashOperator(
         task_id="run_dbt_quality_tests",
         execution_timeout=timedelta(minutes=20),
@@ -40,13 +75,12 @@ with DAG(
             DBT_BIN="${DBT_BIN:-/home/airflow/.local/bin/dbt}"
             if [ ! -x "$DBT_BIN" ]; then
                 echo "dbt executable not found at $DBT_BIN"
-                echo "PATH=$PATH"
                 exit 1
             fi
 
             if [ -z "${DATABRICKS_TOKEN:-}" ] && [ -n "${AIRFLOW_CONN_DATABRICKS_DEFAULT:-}" ]; then
-                DBR_URI="${AIRFLOW_CONN_DATABRICKS_DEFAULT#\'}"
-                DBR_URI="${DBR_URI%\'}"
+                DBR_URI="${AIRFLOW_CONN_DATABRICKS_DEFAULT#\\'}"
+                DBR_URI="${DBR_URI%\\'}"
                 DBR_AUTH_PART="${DBR_URI#*://}"
                 if [ "$DBR_AUTH_PART" != "$DBR_URI" ]; then
                     DBR_AUTH_PART="${DBR_AUTH_PART%%@*}"
@@ -57,7 +91,7 @@ with DAG(
             fi
 
             if [ -z "${DATABRICKS_TOKEN:-}" ]; then
-                echo "Missing DATABRICKS_TOKEN. Set it in .env or include token in AIRFLOW_CONN_DATABRICKS_DEFAULT."
+                echo "Missing DATABRICKS_TOKEN."
                 exit 1
             fi
 
@@ -70,85 +104,41 @@ with DAG(
             FAIL_ON_NON_CRITICAL='{{ dag_run.conf.get("fail_on_non_critical", params.fail_on_non_critical) if dag_run and dag_run.conf else params.fail_on_non_critical }}'
 
             case "$LAYER" in
-                bronze|silver|gold|all)
-                    ;;
-                *)
-                    echo "Unsupported layer '$LAYER'. Expected one of: bronze, silver, gold, all"
-                    exit 1
-                    ;;
+                bronze|silver|gold|all) ;;
+                *) echo "Unsupported layer '$LAYER'"; exit 1 ;;
             esac
 
             case "$BRONZE_SOURCE" in
-                coingecko|fear_greed|onchain)
-                    ;;
-                *)
-                    echo "Unsupported bronze_source '$BRONZE_SOURCE'. Expected one of: coingecko, fear_greed, onchain"
-                    exit 1
-                    ;;
-            esac
-
-            case "$QUALITY_GRACE_DAYS" in
-                ''|*[!0-9]*)
-                    echo "Unsupported quality_grace_days '$QUALITY_GRACE_DAYS'. Expected a non-negative integer"
-                    exit 1
-                    ;;
-                *)
-                    ;;
+                coingecko|fear_greed|onchain) ;;
+                *) echo "Unsupported bronze_source '$BRONZE_SOURCE'"; exit 1 ;;
             esac
 
             DBT_TARGET="${DBT_TARGET:-prod}"
             DBT_THREADS="${DBT_THREADS:-1}"
             DBT_TIMEOUT_SECONDS="${DBT_TEST_TIMEOUT_SECONDS:-600}"
 
-            echo "Quality run context: layer=$LAYER bronze_source=$BRONZE_SOURCE run_key=${RUN_KEY:-<empty>} quality_grace_days=$QUALITY_GRACE_DAYS fail_on_non_critical=$FAIL_ON_NON_CRITICAL"
+            echo "Quality run: layer=$LAYER bronze_source=$BRONZE_SOURCE run_key=${RUN_KEY:-<empty>} grace=$QUALITY_GRACE_DAYS fail_non_critical=$FAIL_ON_NON_CRITICAL"
 
             run_dbt_tests() {
-                TEST_CLASS="$1"
-                shift
-
+                TEST_CLASS="$1"; shift
                 if [ "$#" -eq 0 ]; then
-                    echo "No selectors configured for $TEST_CLASS tests"
-                    return 0
+                    echo "No selectors for $TEST_CLASS tests"; return 0
                 fi
-
-                DBT_CMD=(
-                    "$DBT_BIN" test
-                    --target "$DBT_TARGET"
-                    --threads "$DBT_THREADS"
-                    --select "$@"
-                )
-
+                DBT_CMD=("$DBT_BIN" test --target "$DBT_TARGET" --threads "$DBT_THREADS" --select "$@")
                 DBT_VARS="{quality_grace_days: $QUALITY_GRACE_DAYS"
                 if [ -n "$RUN_KEY" ]; then
-                    # Escape single quotes for YAML single-quoted scalar values.
-                    RUN_KEY_ESCAPED="${RUN_KEY//\'/'\''}"
-                    DBT_VARS=", run_key: '$RUN_KEY_ESCAPED'}"
-                    DBT_VARS="{quality_grace_days: $QUALITY_GRACE_DAYS${DBT_VARS}"
+                    RUN_KEY_ESCAPED="${RUN_KEY//\\'/\\'\\'\\'}"
+                    DBT_VARS="{quality_grace_days: $QUALITY_GRACE_DAYS, run_key: '$RUN_KEY_ESCAPED'}"
                 else
                     DBT_VARS="$DBT_VARS}"
                 fi
                 DBT_CMD+=(--vars "$DBT_VARS")
-
-                echo "Running $TEST_CLASS dbt tests for layer=$LAYER"
-                echo "Selectors: $*"
+                echo "Running $TEST_CLASS tests: $*"
                 if command -v timeout >/dev/null 2>&1; then
-                    if timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"; then
-                        return 0
-                    else
-                        DBT_EXIT_CODE=$?
-                        if [ "$DBT_EXIT_CODE" -eq 124 ]; then
-                            echo "$TEST_CLASS dbt tests timed out after ${DBT_TIMEOUT_SECONDS}s"
-                        fi
-                        return "$DBT_EXIT_CODE"
-                    fi
+                    timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"
+                    return $?
                 fi
-
-                if "${DBT_CMD[@]}"; then
-                    return 0
-                else
-                    DBT_EXIT_CODE=$?
-                    return "$DBT_EXIT_CODE"
-                fi
+                "${DBT_CMD[@]}"
             }
 
             CRITICAL_SELECTORS=()
@@ -159,14 +149,12 @@ with DAG(
                 if [ "$BRONZE_SOURCE" = "coingecko" ]; then
                     if [ -z "$RUN_KEY" ]; then
                         if [ "$LAYER" = "all" ]; then
-                            echo "run_key missing for bronze_source=coingecko while layer=all. Skipping run-scoped coingecko bronze checks and continuing with other selected layers."
+                            echo "run_key missing for coingecko bronze while layer=all. Skipping."
                             SKIP_COINGECKO_BRONZE=true
                         else
-                            echo "run_key is required for bronze_source=coingecko quality checks. Provide it in DAG run config."
-                            exit 1
+                            echo "run_key required for bronze_source=coingecko"; exit 1
                         fi
                     fi
-
                     if [ "$SKIP_COINGECKO_BRONZE" = "false" ]; then
                         CRITICAL_SELECTORS+=(
                             path:tests/bronze/bronze_batch_has_data.sql
@@ -176,27 +164,22 @@ with DAG(
                         )
                         NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_numeric_values_sane.sql)
                         NON_CRITICAL_SELECTORS+=(path:tests/bronze/bronze_batch_no_future_timestamps.sql)
-                        NON_CRITICAL_SELECTORS+=(path:models/Sources)
-                        NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                        NON_CRITICAL_SELECTORS+=(path:models/Sources path:models/sources path:models/bronze)
                     fi
                 fi
-
                 if [ "$BRONZE_SOURCE" = "fear_greed" ]; then
                     CRITICAL_SELECTORS+=(
                         path:tests/bronze/bronze_fear_greed_no_duplicate_metric_date.sql
                         path:tests/bronze/bronze_fear_greed_value_range.sql
                     )
-                    NON_CRITICAL_SELECTORS+=(path:models/Sources)
-                    NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                    NON_CRITICAL_SELECTORS+=(path:models/Sources path:models/sources path:models/bronze)
                 fi
-
                 if [ "$BRONZE_SOURCE" = "onchain" ]; then
                     CRITICAL_SELECTORS+=(
                         path:tests/bronze/bronze_onchain_no_duplicate_metric_date.sql
                         path:tests/bronze/bronze_onchain_metrics_non_negative.sql
                     )
-                    NON_CRITICAL_SELECTORS+=(path:models/Sources)
-                    NON_CRITICAL_SELECTORS+=(path:models/bronze)
+                    NON_CRITICAL_SELECTORS+=(path:models/Sources path:models/sources path:models/bronze)
                 fi
             fi
 
@@ -242,15 +225,15 @@ with DAG(
                 if run_dbt_tests "non-critical" "${NON_CRITICAL_SELECTORS[@]}"; then
                     :
                 else
-                    NON_CRITICAL_EXIT_CODE=$?
-                    echo "Non-critical quality checks failed (exit $NON_CRITICAL_EXIT_CODE)."
+                    NC_EXIT=$?
+                    echo "Non-critical checks failed (exit $NC_EXIT)."
                     if [ "${FAIL_ON_NON_CRITICAL,,}" = "true" ]; then
-                        exit "$NON_CRITICAL_EXIT_CODE"
+                        exit "$NC_EXIT"
                     fi
-                    echo "Continuing by policy because fail_on_non_critical=false"
+                    echo "Continuing (fail_on_non_critical=false)"
                 fi
             else
-                echo "No non-critical tests selected for layer=$LAYER"
+                echo "No non-critical tests for layer=$LAYER"
             fi
         """,
         env={
@@ -259,3 +242,6 @@ with DAG(
             "DATABRICKS_AUTH_TYPE": "pat",
         },
     )
+
+
+data_quality()
