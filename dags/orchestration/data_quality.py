@@ -65,6 +65,7 @@ def data_quality():
 
     run_dbt_quality_tests = BashOperator(
         task_id="run_dbt_quality_tests",
+        retries=0,
         execution_timeout=timedelta(minutes=20),
         append_env=True,
         bash_command="""
@@ -119,6 +120,45 @@ def data_quality():
 
             echo "Quality run: layer=$LAYER bronze_source=$BRONZE_SOURCE run_key=${RUN_KEY:-<empty>} grace=$QUALITY_GRACE_DAYS fail_non_critical=$FAIL_ON_NON_CRITICAL"
 
+            print_dbt_failure_summary() {
+                local run_results_file="target/run_results.json"
+                if [ ! -f "$run_results_file" ]; then
+                    echo "WARNING: dbt returned non-zero but $run_results_file was not found. See full dbt output above."
+                    return 0
+                fi
+
+                python - <<'PY'
+import json
+
+path = "target/run_results.json"
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+except Exception as exc:  # noqa: BLE001
+    print(f"WARNING: Could not parse {path}: {exc}")
+    raise SystemExit(0)
+
+results = payload.get("results") or []
+failures = [r for r in results if r.get("status") in {"fail", "error"}]
+if not failures:
+    print("WARNING: dbt failed but run_results.json had no fail/error records.")
+    raise SystemExit(0)
+
+print("WARNING: Data quality issues detected:")
+for item in failures[:20]:
+    node_id = item.get("unique_id", "unknown_test")
+    message = (item.get("message") or "").strip().replace("\\n", " ")
+    if message:
+        print(f" - {node_id}: {message}")
+    else:
+        print(f" - {node_id}")
+
+remaining = len(failures) - 20
+if remaining > 0:
+    print(f" - ... and {remaining} more failures")
+PY
+            }
+
             run_dbt_tests() {
                 TEST_CLASS="$1"; shift
                 if [ "$#" -eq 0 ]; then
@@ -134,11 +174,28 @@ def data_quality():
                 fi
                 DBT_CMD+=(--vars "$DBT_VARS")
                 echo "Running $TEST_CLASS tests: $*"
+
+                DBT_EXIT=0
                 if command -v timeout >/dev/null 2>&1; then
-                    timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"
-                    return $?
+                    if timeout --signal=TERM "$DBT_TIMEOUT_SECONDS" "${DBT_CMD[@]}"; then
+                        DBT_EXIT=0
+                    else
+                        DBT_EXIT=$?
+                    fi
+                else
+                    if "${DBT_CMD[@]}"; then
+                        DBT_EXIT=0
+                    else
+                        DBT_EXIT=$?
+                    fi
                 fi
-                "${DBT_CMD[@]}"
+
+                if [ "$DBT_EXIT" -ne 0 ]; then
+                    echo "WARNING: $TEST_CLASS dbt tests failed with exit code $DBT_EXIT"
+                    print_dbt_failure_summary
+                fi
+
+                return "$DBT_EXIT"
             }
 
             CRITICAL_SELECTORS=()

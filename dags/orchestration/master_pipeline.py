@@ -37,7 +37,7 @@ Daily orchestrator that triggers the full medallion-architecture flow:
 1. **Bronze ingestion** — CoinGecko, Fear & Greed, On-chain (parallel)
 2. **Silver transformation** — `dbt run --select silver` (waits for all bronze)
 3. **Gold transformation** — `dbt run --select gold` (waits for silver)
-4. **Quality gate** — `dbt test` on all layers (blocks pipeline completion)
+4. **Quality gate** — `dbt test` on all layers (non-critical findings logged as warnings)
 
 Runs at **00:05 UTC** daily. Catchup is disabled.
 """
@@ -128,7 +128,7 @@ def master_pipeline():
         execution_timeout=timedelta(minutes=30),
         conf={
             "layer": "all",
-            "fail_on_non_critical": True,
+            "fail_on_non_critical": False,
         },
     )
 

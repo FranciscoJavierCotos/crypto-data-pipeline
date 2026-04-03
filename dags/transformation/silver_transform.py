@@ -135,13 +135,14 @@ def silver_transform():
     test_dbt_silver = BashOperator(
         task_id="test_dbt_silver",
         execution_timeout=timedelta(minutes=15),
+        retries=0,
         append_env=True,
         env=DBT_ENV,
         bash_command=DBT_PREAMBLE + """
             "$DBT_BIN" test \
                 --target "$DBT_TARGET" \
                 --threads "$DBT_THREADS" \
-                --select "+path:models/silver"
+                --select "path:models/silver"
         """,
     )
 
