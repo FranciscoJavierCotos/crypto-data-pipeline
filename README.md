@@ -16,7 +16,9 @@ This project demonstrates practical data engineering skills that companies need:
 <p align="center">
   <img src="./crypto_medallion_architecture.svg" width="700" />
 </p>
-
+<p align="center">
+  <img src="./succesfull-dag.jpg" width="1000" />
+</p>
 
 ## Daily Orchestration Flow
 
