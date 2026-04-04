@@ -1,6 +1,6 @@
 # Crypto Data Pipeline
 
-This project is a production data engineering pipeline that collects crypto data every day and turns it into analytics-ready tables.
+This project is a production-grade data engineering pipeline that ingests daily cryptocurrency data and transforms it into analytics-ready tables.
 
 It combines Airflow, Databricks, and dbt to ingest data from multiple APIs, standardize it through a medallion model (bronze, silver, gold), and run quality checks before publishing outputs.
 
